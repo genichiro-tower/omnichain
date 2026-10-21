@@ -52,7 +52,7 @@ wallet.addressUserFriendly({ bounceable: false }); // UQ…
 - `createExternalRequest({ seqno, messages, validUntil, deploy })` is a request the wallet sends itself (and pays for). W5 sends external requests with "ignore errors" (+2) on every message.
 - `createInternalRequest({ seqno, messages, validUntil })` is a request for a relayer (op `0x73696e74`). Send modes are kept as given, so without +2 its messages leave together or not at all.
 - `signTransaction(transaction, chain)` reads the seqno and whether the wallet is deployed, and signs a `TonUnsignedTransaction` as an external request.
-- `signMessage` / `verifySignature` sign the message's UTF-8 bytes with ed25519. `TonChain.verifyMessageSignature` throws: a TON address does not reveal its key.
+- `signMessage` / `verifySignature` sign `tonMessageHash(message)` = SHA-256(`"TON Signed Message:\n"` + the message's UTF-8 bytes) with ed25519, the shape of Stellar's SEP-53. Never the message's own bytes: the same key signs W5 requests over a 32-byte cell hash, so a crafted 32-byte message would otherwise yield a signature that authorizes a transfer. `TonChain.verifyMessageSignature` throws: a TON address does not reveal its key.
 
 ## Messages and relaying
 

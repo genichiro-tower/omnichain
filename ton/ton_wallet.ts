@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 
 import { type Cell, type StateInit, beginCell, external, storeMessage } from '@ton/core';
 import { keyPairFromSeed, sign, signVerify } from '@ton/crypto';
@@ -45,6 +45,19 @@ export function deriveSlip10Ed25519Seed(bip39Seed: Uint8Array, path: readonly nu
 /** The ed25519 seed of `m/44'/607'/{index}'`. */
 export function deriveTonEd25519Seed(bip39Seed: Uint8Array, index: number): Buffer {
   return deriveSlip10Ed25519Seed(bip39Seed, [44, TON_COIN_TYPE, index]);
+}
+
+const TON_MESSAGE_PREFIX = 'TON Signed Message:\n';
+
+/**
+ * What `signMessage` signs: SHA-256 of a fixed prefix and the message's UTF-8
+ * bytes, as Stellar's SEP-53 does. The same key authorizes W5 requests by
+ * signing a 32-byte cell hash, so signing a message's bytes directly would let
+ * a crafted 32-byte message stand in for a request; a prefixed digest cannot
+ * equal a cell hash without a SHA-256 preimage.
+ */
+export function tonMessageHash(message: string): Buffer {
+  return createHash('sha256').update(TON_MESSAGE_PREFIX, 'utf8').update(message, 'utf8').digest();
 }
 
 export class TonSignedMessage extends AbstractSignedMessage {
@@ -204,14 +217,14 @@ export class TonWallet extends AbstractBip32StyleSingleAccountWallet {
     return new TonSignedTransaction({ chainId: transaction.chainId, boc: request.boc, hash: request.hash });
   }
 
-  /** An ed25519 signature over the message's UTF-8 bytes, hex. */
+  /** An ed25519 signature over {@link tonMessageHash}, hex; never over the message's bytes, which could pass for a request hash. */
   signMessage(message: string): TonSignedMessage {
-    return new TonSignedMessage(sign(Buffer.from(message, 'utf8'), this.#secretKey).toString('hex'));
+    return new TonSignedMessage(sign(tonMessageHash(message), this.#secretKey).toString('hex'));
   }
 
   verifySignature(message: string, signedMessage: AbstractSignedMessage): boolean {
     try {
-      return signVerify(Buffer.from(message, 'utf8'), Buffer.from(signedMessage.signature, 'hex'), this.publicKey);
+      return signVerify(tonMessageHash(message), Buffer.from(signedMessage.signature, 'hex'), this.publicKey);
     } catch {
       return false;
     }

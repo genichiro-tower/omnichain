@@ -115,7 +115,10 @@ afterwards whether it did.
   - It exposes `publicKey` and the W5R1 `address` (workchain 0, the mainnet
     client wallet id).
   - It exposes `stateInit()`.
-  - It exposes `signMessage(message)` and `verify`.
+  - It exposes `signMessage(message)` and `verify`, over SHA-256 of
+    `"TON Signed Message:\n"` and the message (SEP-53's shape), never the
+    message's own bytes: the key also signs W5 requests over a 32-byte cell
+    hash, and a crafted message must not stand in for one.
   - Its address equals `@ton/ton`'s `WalletContractV5R1` address for the same
     key and wallet id.
 - **R5. Requests.** For a W5R1 wallet and `messages[1..255]` (`to`, `value`,

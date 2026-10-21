@@ -1,7 +1,11 @@
+import { createHash } from 'node:crypto';
+
 import { Cell, loadMessage } from '@ton/core';
 import { WalletContractV5R1 } from '@ton/ton';
 
-import { TonWallet, deriveSlip10Ed25519Seed } from '../ton_wallet.ts';
+import { signVerify } from '@ton/crypto';
+
+import { TonWallet, deriveSlip10Ed25519Seed, tonMessageHash } from '../ton_wallet.ts';
 import { tonExternalBocHash } from '../ton_transactions.ts';
 
 const MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
@@ -80,5 +84,17 @@ describe('TonWallet', () => {
     const signed = wallet.signMessage('hello');
     expect(wallet.verifySignature('hello', signed)).toBe(true);
     expect(wallet.verifySignature('hellO', signed)).toBe(false);
+  });
+
+  it('never signs a message\'s own bytes, which could pass for a W5 request hash', () => {
+    // W5 accepts a signature over a 32-byte cell hash; a 32-byte message must not yield one.
+    const message = 'a'.repeat(32);
+    const signed = wallet.signMessage(message);
+    const signature = Buffer.from(signed.signature, 'hex');
+    expect(signVerify(Buffer.from(message, 'utf8'), signature, wallet.publicKey)).toBe(false);
+    expect(signVerify(tonMessageHash(message), signature, wallet.publicKey)).toBe(true);
+    expect(tonMessageHash('hello').toString('hex')).toBe(
+      createHash('sha256').update('TON Signed Message:\nhello').digest('hex'),
+    );
   });
 });
