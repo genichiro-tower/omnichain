@@ -84,7 +84,7 @@ describe('TonTransactionStatus', () => {
       chainId: CHAIN_ID_TON_MAINNET,
       trace: {
         complete: true,
-        transactions: [{ ...root, outMsgs: [{ ...root.outMsgs[0], bounce: true }] }, { ...child, success: false }],
+        transactions: [{ ...root, outMsgs: [{ ...root.outMsgs[0], bounce: true }] }, { ...child, success: false, aborted: true }],
       },
       masterchainTip: 100472540,
     });
@@ -151,7 +151,7 @@ describe('TonTransactionStatus', () => {
       });
     expect(judge(received).status).toBe(TransactionStatusTypes.Success);
     expect(judge(received).summary?.deliveries.map((d) => d.outcome)).toEqual(['delivered', 'delivered']);
-    expect(judge({ ...received, success: false }).error?.code).toBe('bounced');
+    expect(judge({ ...received, success: false, aborted: true }).error?.code).toBe('bounced');
     expect(judge(null).error?.code).toBe('undelivered');
   });
 
@@ -215,9 +215,13 @@ describe('TonTransactionStatus', () => {
     const settled = judge(receiverJettonWallet);
     expect(settled.status).toBe(TransactionStatusTypes.Success);
     expect(settled.summary?.deliveries[0]).toMatchObject({ outcome: 'delivered', transaction: receiverJettonWallet.hash });
-    const refunded = judge({ ...receiverJettonWallet, success: false });
+    const refunded = judge({ ...receiverJettonWallet, success: false, aborted: true });
     expect(refunded.status).toBe(TransactionStatusTypes.Failed);
     expect(refunded.error?.code).toBe('jetton_bounced');
+    // Its excess refund skipped under "ignore errors": the jettons still landed.
+    const excessSkipped = judge({ ...receiverJettonWallet, success: false, aborted: false, skippedActions: 1 });
+    expect(excessSkipped.status).toBe(TransactionStatusTypes.Success);
+    expect(excessSkipped.summary?.failedTransactions).toHaveLength(1);
   });
 
   it('is Failed when a wallet skipped a message it could not send', async () => {

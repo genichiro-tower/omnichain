@@ -184,8 +184,11 @@ function deliveryOf(
   const index = received.findIndex((tx) => tx.account === message.destination && tx.inMsg?.value === message.value);
   const receiver = index === -1 ? null : received.splice(index, 1)[0];
   if (receiver === null) return { receiver, outcome: complete ? 'undelivered' : 'pending' };
-  // A bounceable message comes back when its receiver fails or aborts (e.g. it has no code yet).
-  const bouncedBack = message.bounce && (!receiver.success || receiver.aborted);
+  // TON bounces a bounceable message only when its receiver's transaction
+  // aborted — a failed compute or action phase, or no code yet. A receiver that
+  // merely skipped one of its own sends (e.g. an excess refund under "ignore
+  // errors") kept the value.
+  const bouncedBack = message.bounce && receiver.aborted;
   return { receiver, outcome: bouncedBack ? 'bounced' : 'delivered' };
 }
 
