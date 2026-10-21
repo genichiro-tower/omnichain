@@ -84,8 +84,12 @@ afterwards whether it did.
       before signing a replacement;
     - a broadcast reply is read by the lite server's text, not its HTTP
       status (TON Center sends both as 500): "cannot apply external
-      message" is a definite `BroadcastRejected`; "duplicate message" means
-      the network has it, and counts as sent;
+      message" on W5's seqno check (exit code 133, the first check after the
+      signature) is `NonceTooLow` — it or another request with its seqno
+      landed, which is what a resend of a landed message gets; any other
+      refusal is a definite `BroadcastRejected`; "duplicate message" means
+      the network has it, and counts as sent. The uncertain broadcast has
+      its own kind, `BroadcastUncertain`;
     - a definite answer from TON Center, such as "not found" or a failed
       emulation, is never second-guessed by TonAPI;
     - without a TonAPI config, there is no fallback.
@@ -305,9 +309,10 @@ PR: `getomnichain/omnichain#17` (`genichiro-tower:feature/ton-chain` →
   message. Each provider checks a trace before returning it: every internal
   message names its source and `created_lt`, and every transaction received
   a message its parent sent, to that account, with that value. A trace that
-  breaks this fails retryably, so it is read from TonAPI instead. A TON
-  Center trace with a transaction left out is incomplete, and that
-  transaction stays its children's parent. Matching by destination and value paired
+  breaks this fails retryably, so it is read from TonAPI instead. A running
+  TON Center trace without a transaction yet is incomplete, and that
+  transaction stays its children's parent; a finished one that leaves a
+  transaction out is read from TonAPI. Matching by destination and value paired
   identical messages arbitrarily (a vault's jetton transfers all go to its
   own jetton wallet with the same attached TON). `summary.deliveries` is
   ordered as each wallet sent its messages, the request's order.
@@ -338,7 +343,9 @@ PR: `getomnichain/omnichain#17` (`genichiro-tower:feature/ton-chain` →
     recording one needs jettons on the fee payer.
 - **R8, expiry:** `isRequestExpired({ wallet, seqno, validUntil, hash })`
   uses the chain's clock (the masterchain head's time, 60 s margin), the
-  wallet's seqno and the absence of a trace, never the local clock.
+  wallet's seqno and the absence of a trace, never the local clock. A failed
+  or malformed read throws; no provider reads a failure as a 0 seqno or a
+  `NaN` time.
 - The root entry exports only `TonAddress`; the family is `./ton`.
 
 ---

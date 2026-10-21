@@ -4,7 +4,7 @@ import { CHAIN_ID_TON_MAINNET } from '../../chain_ids.ts';
 import { ChainErrorKinds } from '../../errors.ts';
 import { REQUEST_EXPIRY_MARGIN_SECONDS, TonChain } from '../ton_chain.ts';
 import { TON_JETTON_TRANSFER_OP } from '../ton_messages.ts';
-import { type TonAccountState, TonBroadcastUncertainError, type TonProvider } from '../ton_provider.ts';
+import { type TonAccountState, TonBroadcastUncertainError, type TonProvider, TonProviderError } from '../ton_provider.ts';
 import { TonUnsignedTransaction } from '../ton_transactions.ts';
 import { TonWallet } from '../ton_wallet.ts';
 import { JETTON_WALLET, MNEMONIC, OTHER, USDT_MASTER } from './ton_test_helpers.ts';
@@ -111,6 +111,13 @@ describe('TonChain', () => {
     await expect(at(past).isRequestExpired({ wallet: OTHER, seqno: 2, validUntil, hash })).resolves.toBe(false);
     const landed = at(past, { getTrace: async () => ({ complete: false, transactions: [] }) });
     await expect(landed.isRequestExpired({ wallet: OTHER, seqno: 3, validUntil, hash })).resolves.toBe(false);
+    // A seqno that could not be read is an error, not an unmoved seqno.
+    const unreadable = at(past, {
+      getSeqno: async () => {
+        throw new TonProviderError(ChainErrorKinds.RpcError, 'could not run seqno', true);
+      },
+    });
+    await expect(unreadable.isRequestExpired({ wallet: OTHER, seqno: 3, validUntil, hash })).rejects.toThrow('could not run seqno');
   });
 
   it('reads TON and jetton balances', async () => {

@@ -9,9 +9,11 @@ import {
   type TonProvider,
   type TonTrace,
   type TonTraceTransaction,
+  TonProviderError,
   asAccountStatus,
   asBigInt,
   asRecord,
+  asRequiredInteger,
   assertTraceConsistent,
   definiteError,
   errorMessageOf,
@@ -49,7 +51,8 @@ export class TonapiProvider implements TonProvider {
 
   async getSeqno(address: string): Promise<number> {
     const reply = await this.get(`/v2/wallet/${encodeURIComponent(tonRawAddress(address))}/seqno`);
-    return reply === null ? 0 : Number(asRecord(reply, 'seqno').seqno ?? 0);
+    if (reply === null) throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} has no seqno for ${address}`, true);
+    return asRequiredInteger(asRecord(reply, 'seqno').seqno, 'seqno');
   }
 
   async getJettonWalletAddress(jettonMaster: string, owner: string): Promise<string> {
@@ -104,7 +107,7 @@ export class TonapiProvider implements TonProvider {
 
   async getMasterchainHead(): Promise<TonMasterchainHead> {
     const reply = asRecord(await this.get('/v2/blockchain/masterchain-head'), 'masterchain-head');
-    return { seqno: Number(reply.seqno), utime: Number(reply.gen_utime) };
+    return { seqno: asRequiredInteger(reply.seqno, 'masterchain seqno'), utime: asRequiredInteger(reply.gen_utime, 'masterchain gen_utime') };
   }
 
   /**

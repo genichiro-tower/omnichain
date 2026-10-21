@@ -268,10 +268,11 @@ describe('TON mainnet (live)', () => {
     await expect(chain.isRequestExpired({ wallet: feePayer.address, ...sent })).resolves.toBe(false);
   });
 
-  // A provider answers a resend of a landed message with a refusal, or accepts
-  // it (a duplicate, or a lite server behind the message); either way the
+  // A provider answers a resend of a landed message with W5's seqno refusal
+  // (NonceTooLow: check the status, never a plain rejection), or accepts it
+  // (a duplicate, or a lite server behind the message); either way the
   // wallet's seqno keeps it from landing again.
-  (env.send ? it : it.skip)('answers a resent message definitely on both providers, and does not land it twice', async () => {
+  (env.send ? it : it.skip)('answers a resent message as possibly landed on both providers, and does not land it twice', async () => {
     if (sent === null) throw new Error('the deploy relay was not sent');
     const seqno = await chain.getSeqno(feePayer.address);
     expect(seqno).toBe(sent.seqno + 1);
@@ -284,7 +285,7 @@ describe('TON mainnet (live)', () => {
         if (!(err as { retryable?: boolean } | null)?.retryable) break;
         await new Promise((resolve) => setTimeout(resolve, 2_000));
       }
-      if (err !== null) expect(err).toMatchObject({ kind: ChainErrorKinds.BroadcastRejected, retryable: false });
+      if (err !== null) expect(err).toMatchObject({ kind: ChainErrorKinds.NonceTooLow, retryable: false });
     }
     await new Promise((resolve) => setTimeout(resolve, 15_000));
     expect(await chain.getSeqno(feePayer.address)).toBe(seqno);

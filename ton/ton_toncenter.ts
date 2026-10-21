@@ -14,6 +14,7 @@ import {
   TonProviderError,
   asAccountStatus,
   asBigInt,
+  asRequiredInteger,
   assertTraceConsistent,
   asRecord,
   definiteError,
@@ -52,8 +53,8 @@ export class ToncenterProvider implements TonProvider {
 
   async getSeqno(address: string): Promise<number> {
     const result = await this.runGetMethod(address, 'seqno', []);
-    if (result === null) return 0;
-    return Number(numAt(result, 0, 'seqno'));
+    if (result === null) throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} could not run seqno on ${address}`, true);
+    return asRequiredInteger(String(numAt(result, 0, 'seqno')), 'seqno');
   }
 
   async getJettonWalletAddress(jettonMaster: string, owner: string): Promise<string> {
@@ -88,9 +89,13 @@ export class ToncenterProvider implements TonProvider {
     const trace = asRecord(traces[0], 'trace');
     const info = asRecord(trace.trace_info ?? {}, 'trace_info');
     const { transactions, missing } = orderedTransactions(trace.trace, asRecord(trace.transactions, 'transactions'));
-    const complete =
-      !missing && trace.is_incomplete !== true && info.trace_state === 'complete' && Number(info.pending_messages ?? 0) === 0;
-    return assertTraceConsistent(NAME, { complete, transactions });
+    const finished = trace.is_incomplete !== true && info.trace_state === 'complete' && Number(info.pending_messages ?? 0) === 0;
+    // A trace still running may not have every transaction yet; a finished one
+    // without them never will, so TonAPI is asked instead.
+    if (finished && missing) {
+      throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} returned a finished trace with transactions left out`, true);
+    }
+    return assertTraceConsistent(NAME, { complete: finished && !missing, transactions });
   }
 
   async emulate(boc: string): Promise<TonTrace> {
@@ -110,7 +115,7 @@ export class ToncenterProvider implements TonProvider {
   async getMasterchainHead(): Promise<TonMasterchainHead> {
     const reply = asRecord(await this.get('/api/v3/masterchainInfo'), 'masterchainInfo');
     const last = asRecord(reply.last, 'last');
-    return { seqno: Number(last.seqno), utime: Number(last.gen_utime) };
+    return { seqno: asRequiredInteger(last.seqno, 'masterchain seqno'), utime: asRequiredInteger(last.gen_utime, 'masterchain gen_utime') };
   }
 
   /** The stack of a get-method that ran, or `null` when the account has no code to run it. */

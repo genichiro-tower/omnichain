@@ -80,7 +80,7 @@ export interface TonTrace {
 export interface TonProvider {
   readonly name: string;
   getAccountState(address: string): Promise<TonAccountState>;
-  /** 0 for a wallet that is not deployed. */
+  /** The seqno of a deployed wallet; throws when it cannot be read, never reads a failure as 0. */
   getSeqno(address: string): Promise<number>;
   getJettonWalletAddress(jettonMaster: string, owner: string): Promise<string>;
   /** 0 for a jetton wallet that is not deployed. */
@@ -122,7 +122,7 @@ export class TonProviderError extends ChainError {
  */
 export class TonBroadcastUncertainError extends TonProviderError {
   constructor(message: string, meta?: ChainErrorMeta, cause?: Error) {
-    super(ChainErrorKinds.RpcError, message, false, meta, cause);
+    super(ChainErrorKinds.BroadcastUncertain, message, false, meta, cause);
     this.name = 'TonBroadcastUncertainError';
   }
 }
@@ -216,6 +216,8 @@ export interface TonHttpEndpoint {
 }
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+/** Enough of an error reply to keep the lite server's exit code, which follows a long preamble. */
+const ERROR_TEXT_LIMIT = 1_000;
 
 /** One JSON request; maps every failure to a {@link TonProviderError}. Returns `null` on a 404. */
 export async function tonHttpJson(
@@ -240,7 +242,7 @@ export async function tonHttpJson(
   const text = await response.text();
   if (response.status === 404) return null;
   if (response.status === 429 || response.status >= 500) {
-    throw new TonProviderError(ChainErrorKinds.RpcError, `${provider} ${path} answered HTTP ${response.status}: ${text.slice(0, 200)}`, true);
+    throw new TonProviderError(ChainErrorKinds.RpcError, `${provider} ${path} answered HTTP ${response.status}: ${text.slice(0, ERROR_TEXT_LIMIT)}`, true);
   }
   let payload: unknown;
   try {
@@ -249,7 +251,7 @@ export async function tonHttpJson(
     throw new TonProviderError(ChainErrorKinds.RpcError, `${provider} ${path} answered non-JSON (HTTP ${response.status})`, true);
   }
   if (response.status >= 400) {
-    const message = errorMessageOf(payload) ?? text.slice(0, 200);
+    const message = errorMessageOf(payload) ?? text.slice(0, ERROR_TEXT_LIMIT);
     throw new TonProviderError(ChainErrorKinds.RpcError, `${provider} ${path} refused (HTTP ${response.status}): ${message}`, false);
   }
   return payload;
@@ -257,6 +259,13 @@ export async function tonHttpJson(
 
 const EXTERNAL_MESSAGE_REFUSED = /cannot apply external message/i;
 const EXTERNAL_MESSAGE_DUPLICATE = /duplicate message/i;
+const REFUSAL_EXIT_CODE = /exit\s*code\s*[=:]?\s*(-?\d+)/i;
+/**
+ * W5R1 checks the signature, then the seqno, then the wallet id, then
+ * `valid_until`: a message that already landed fails on the seqno, and only
+ * there — every later refusal means the seqno still matched.
+ */
+const W5_INVALID_SEQNO = 133;
 
 /**
  * The reply to a broadcast, read for what the lite server said rather than
@@ -264,9 +273,10 @@ const EXTERNAL_MESSAGE_DUPLICATE = /duplicate message/i;
  * TonAPI as 500 or 406):
  * - "duplicate message": the network already has this exact message, so the
  *   broadcast succeeded;
- * - "cannot apply external message": the wallet does not accept it now — a
- *   definite `BroadcastRejected`, though the same message may have landed
- *   earlier.
+ * - "cannot apply external message": the wallet does not accept it now. On
+ *   W5's seqno check this is `NonceTooLow` — this message or another with its
+ *   seqno already landed, so read the status before signing again; any other
+ *   refusal is a definite `BroadcastRejected`.
  */
 export async function tonBroadcastReply(provider: string, reply: Promise<unknown>): Promise<unknown> {
   try {
@@ -275,6 +285,16 @@ export async function tonBroadcastReply(provider: string, reply: Promise<unknown
     if (!(err instanceof TonProviderError)) throw err;
     if (EXTERNAL_MESSAGE_DUPLICATE.test(err.message)) return {};
     if (EXTERNAL_MESSAGE_REFUSED.test(err.message)) {
+      const exitCode = Number(REFUSAL_EXIT_CODE.exec(err.message)?.[1]);
+      if (exitCode === W5_INVALID_SEQNO) {
+        throw new TonProviderError(
+          ChainErrorKinds.NonceTooLow,
+          `${provider} refused the message: the wallet's seqno has moved past it, so it or another request with its seqno landed: ${err.message}`,
+          false,
+          undefined,
+          err,
+        );
+      }
       throw new TonProviderError(ChainErrorKinds.BroadcastRejected, `${provider} refused the message: ${err.message}`, false, undefined, err);
     }
     throw err;
@@ -302,6 +322,15 @@ export function asBigInt(value: unknown, what: string): bigint {
   }
   if (value === undefined || value === null) return 0n;
   throw new TonProviderError(ChainErrorKinds.RpcError, `Malformed TON provider reply: ${what} is not an integer`, false);
+}
+
+/** A required integer field; a reply without one says nothing definite, so the fallback is asked. */
+export function asRequiredInteger(value: unknown, what: string): number {
+  const parsed = typeof value === 'number' ? value : typeof value === 'string' && /^-?\d+$/.test(value) ? Number(value) : NaN;
+  if (!Number.isSafeInteger(parsed)) {
+    throw new TonProviderError(ChainErrorKinds.RpcError, `Malformed TON provider reply: ${what} is missing or not an integer`, true);
+  }
+  return parsed;
 }
 
 export function asAccountStatus(value: unknown): TonAccountStatus {

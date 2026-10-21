@@ -129,7 +129,7 @@ describe('TonFallbackProvider', () => {
       );
       const err = await provider.sendBoc('boc').catch((e: unknown) => e);
       expect(err).toBeInstanceOf(TonBroadcastUncertainError);
-      expect((err as TonProviderError).retryable).toBe(false);
+      expect(err).toMatchObject({ kind: ChainErrorKinds.BroadcastUncertain, retryable: false });
     });
 
     it('reads a failure without an answer and no fallback as uncertain', async () => {
@@ -236,14 +236,32 @@ describe('trace normalization', () => {
     expect(onFallback).toHaveBeenCalledWith('getTrace', expect.any(TonProviderError));
   });
 
-  it('reads a TON Center trace with a transaction left out as incomplete, keeping its children under it', async () => {
-    const toncenter = fixture('toncenter_trace.json') as ToncenterTraceFixture;
+  it('reads a running TON Center trace with a transaction not yet in it as incomplete, keeping its children under it', async () => {
+    const toncenter = fixture('toncenter_trace.json') as ToncenterTraceFixture & { traces: Array<{ trace_info: Record<string, unknown> }> };
     delete toncenter.traces[0].transactions[toncenter.traces[0].trace.tx_hash];
+    toncenter.traces[0].trace_info = { ...toncenter.traces[0].trace_info, trace_state: 'pending' };
     stubFetch(() => ({ status: 200, body: toncenter }));
     const trace = await new ToncenterProvider(ENDPOINT).getTrace(TRACE_HASH);
     expect(trace?.complete).toBe(false);
     expect(trace?.transactions).toHaveLength(1);
     expect(trace?.transactions[0].parent).toBe(TRACE_HASH);
+  });
+
+  it('asks TonAPI when a finished TON Center trace left a transaction out', async () => {
+    const toncenter = fixture('toncenter_trace.json') as ToncenterTraceFixture;
+    delete toncenter.traces[0].transactions[toncenter.traces[0].trace.tx_hash];
+    stubFetch(() => ({ status: 200, body: toncenter }));
+    await expect(new ToncenterProvider(ENDPOINT).getTrace(TRACE_HASH)).rejects.toMatchObject({ retryable: true });
+
+    stubFetch((url) => {
+      if (url.startsWith('https://toncenter.test')) return { status: 200, body: toncenter };
+      if (url.includes('/v2/blockchain/blocks/')) return { status: 200, body: { master_ref: '(-1,8000000000000000,100472527)' } };
+      return { status: 200, body: fixture('tonapi_trace.json') };
+    });
+    const provider = new TonFallbackProvider(new ToncenterProvider({ url: 'https://toncenter.test', apiKey: 'key' }), new TonapiProvider(ENDPOINT));
+    const trace = await provider.getTrace(TRACE_HASH);
+    expect(trace).toMatchObject({ complete: true });
+    expect(trace?.transactions).toHaveLength(2);
   });
 
   it("reads TonAPI's prediction for a message in flight as no trace, and a predicted hop as incomplete", async () => {
@@ -280,6 +298,18 @@ describe('broadcast', () => {
     expect(fromTonapi).toMatchObject({ kind: ChainErrorKinds.BroadcastRejected, retryable: false });
   });
 
+  it("reads W5's seqno refusal as NonceTooLow: the message, or another with its seqno, landed", async () => {
+    const refusal = (exitCode: number): string =>
+      `LITE_SERVER_UNKNOWN: cannot apply external message to current state : External message was not accepted\nCannot run message on account: inbound external message rejected by transaction 420B98...:\nexitcode=${exitCode}, steps=49, gas_used=0`;
+    stubFetch(() => ({ status: 500, body: { error: refusal(133), code: 500 } }));
+    await expect(new ToncenterProvider(ENDPOINT).sendBoc('boc')).rejects.toMatchObject({ kind: ChainErrorKinds.NonceTooLow, retryable: false });
+    stubFetch(() => ({ status: 406, body: { error: `lite server error, code -701: ${refusal(133)}` } }));
+    await expect(new TonapiProvider(ENDPOINT).sendBoc('boc')).rejects.toMatchObject({ kind: ChainErrorKinds.NonceTooLow, retryable: false });
+    // Expiry is checked after the seqno: the seqno still matched, so the message never landed.
+    stubFetch(() => ({ status: 500, body: { error: refusal(136), code: 500 } }));
+    await expect(new ToncenterProvider(ENDPOINT).sendBoc('boc')).rejects.toMatchObject({ kind: ChainErrorKinds.BroadcastRejected });
+  });
+
   it('reads the lite server already having the message as sent', async () => {
     stubFetch(() => ({ status: 500, body: { error: 'lite server error, code 0: cannot send external message : duplicate message' } }));
     await expect(new TonapiProvider(ENDPOINT).sendBoc('boc')).resolves.toBeUndefined();
@@ -288,6 +318,24 @@ describe('broadcast', () => {
   it('keeps any other 5xx retryable', async () => {
     stubFetch(() => ({ status: 503, body: { error: 'overloaded' } }));
     await expect(new ToncenterProvider(ENDPOINT).sendBoc('boc')).rejects.toMatchObject({ kind: ChainErrorKinds.RpcError, retryable: true });
+  });
+});
+
+describe('reads a failure as a failure, never as 0', () => {
+  it('refuses a masterchain head without its time', async () => {
+    stubFetch(() => ({ status: 200, body: { last: { seqno: 1 } } }));
+    await expect(new ToncenterProvider(ENDPOINT).getMasterchainHead()).rejects.toMatchObject({ retryable: true });
+    stubFetch(() => ({ status: 200, body: { seqno: 1 } }));
+    await expect(new TonapiProvider(ENDPOINT).getMasterchainHead()).rejects.toMatchObject({ retryable: true });
+  });
+
+  it("refuses a deployed wallet's seqno it could not read", async () => {
+    stubFetch(() => ({ status: 200, body: { gas_used: 0, exit_code: -13, stack: [] } }));
+    await expect(new ToncenterProvider(ENDPOINT).getSeqno('0:' + 'ab'.repeat(32))).rejects.toMatchObject({ retryable: true });
+    stubFetch(() => ({ status: 404, body: { error: 'entity not found' } }));
+    await expect(new TonapiProvider(ENDPOINT).getSeqno('0:' + 'ab'.repeat(32))).rejects.toMatchObject({ retryable: true });
+    stubFetch(() => ({ status: 200, body: {} }));
+    await expect(new TonapiProvider(ENDPOINT).getSeqno('0:' + 'ab'.repeat(32))).rejects.toMatchObject({ retryable: true });
   });
 });
 
