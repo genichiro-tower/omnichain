@@ -133,17 +133,21 @@ function numAt(stack: ToncenterStackItem[], index: number, what: string): bigint
 /** The trace's transactions, root first then breadth-first along the trace tree. */
 function orderedTransactions(tree: unknown, byHash: Record<string, unknown>): TonTraceTransaction[] {
   const ordered: TonTraceTransaction[] = [];
-  const queue: unknown[] = tree === undefined || tree === null ? [] : [tree];
+  const queue: Array<{ node: unknown; parent: string | null }> =
+    tree === undefined || tree === null ? [] : [{ node: tree, parent: null }];
   while (queue.length > 0) {
-    const node = asRecord(queue.shift(), 'trace node');
+    const { node: raw, parent } = queue.shift() as { node: unknown; parent: string | null };
+    const node = asRecord(raw, 'trace node');
     const tx = byHash[String(node.tx_hash)];
-    if (tx !== undefined) ordered.push(toTransaction(asRecord(tx, 'transaction')));
-    if (Array.isArray(node.children)) queue.push(...node.children);
+    const transaction = tx === undefined ? null : toTransaction(asRecord(tx, 'transaction'), parent);
+    if (transaction !== null) ordered.push(transaction);
+    const children = Array.isArray(node.children) ? node.children : [];
+    queue.push(...children.map((child) => ({ node: child, parent: transaction === null ? parent : transaction.hash })));
   }
   return ordered;
 }
 
-function toTransaction(tx: Record<string, unknown>): TonTraceTransaction {
+function toTransaction(tx: Record<string, unknown>, parent: string | null): TonTraceTransaction {
   const description = asRecord(tx.description ?? {}, 'description');
   const compute = description.compute_ph === undefined ? null : asRecord(description.compute_ph, 'compute_ph');
   const action = description.action === undefined || description.action === null ? null : asRecord(description.action, 'action');
@@ -153,6 +157,7 @@ function toTransaction(tx: Record<string, unknown>): TonTraceTransaction {
   const finalized = tx.finality === undefined || tx.finality === 'finalized';
   return {
     hash: base64ToHex(String(tx.hash)),
+    parent,
     account: tonRawAddress(String(tx.account)),
     success: computeOk && actionOk,
     skippedActions,

@@ -10,7 +10,7 @@ import {
   assetHashOf,
 } from '../transaction_status.ts';
 import { TonAsset } from './ton_asset.ts';
-import { TON_JETTON_INTERNAL_TRANSFER_OP } from './ton_messages.ts';
+import { TON_JETTON_INTERNAL_TRANSFER_OP, TON_W5_SIGNED_INTERNAL_OP } from './ton_messages.ts';
 import type { TonTrace, TonTraceMessage, TonTraceTransaction } from './ton_provider.ts';
 
 /** Jettons a jetton wallet received in a trace (a TEP-74 `internal_transfer` it accepted). */
@@ -22,10 +22,48 @@ export interface TonJettonCredit {
   from: string | null;
 }
 
+/** What happened to one message a wallet sent. */
+export type TonDeliveryOutcome =
+  /** Its destination received it (a non-bounceable message is delivered even if the receiver then failed). */
+  | 'delivered'
+  /** Its destination failed and the value came back. */
+  | 'bounced'
+  /** The trace is complete but no transaction received it. */
+  | 'undelivered'
+  /** The trace is still running. */
+  | 'pending';
+
+export interface TonMessageDelivery {
+  /** The sending wallet, raw. */
+  from: string;
+  /** Raw. */
+  to: string;
+  value: bigint;
+  outcome: TonDeliveryOutcome;
+  /** The receiving transaction's hash, when there is one. */
+  transaction: string | null;
+}
+
+/** Why the request did not do what it was signed for. */
+export interface TonRequestProblem {
+  code: string;
+  reason: string;
+}
+
 /** What a trace did, from either a real trace or an emulation. */
 export interface TonTraceSummary {
-  /** Every transaction succeeded and no message bounced. */
+  /**
+   * The request did what it was signed for: the sending wallet's transaction
+   * (and, for a relayed request, the target wallet's) succeeded with nothing
+   * skipped, and every message those wallets sent was delivered. Failures
+   * further down — a recipient contract that throws on a notification, an
+   * excess refund that was skipped — do not undo those deliveries and are
+   * reported in `failedTransactions` / `bouncedMessages` only.
+   */
   success: boolean;
+  problem: TonRequestProblem | null;
+  /** Every message the sending wallets sent, and what became of it. */
+  deliveries: TonMessageDelivery[];
   /** Nanotons the network took: every transaction's fees plus the forward fees its messages carried. */
   fees: bigint;
   failedTransactions: TonTraceTransaction[];
@@ -64,16 +102,81 @@ export function summarizeTonTrace(chainId: number, trace: TonTrace): TonTraceSum
       new Map([[assetHashOf(native), { token: native, change: AssetBalanceChange.fromMr(delta, TonAsset.NATIVE_DECIMALS) }]]),
     );
   }
-  const failedTransactions = trace.transactions.filter((tx) => !tx.success);
-  const bouncedMessages = trace.transactions.flatMap((tx) => (tx.inMsg !== null && tx.inMsg.bounced ? [tx.inMsg] : []));
+  const { problem, deliveries } = judgeRequest(trace);
   return {
-    success: failedTransactions.length === 0 && bouncedMessages.length === 0,
+    success: problem === null,
+    problem,
+    deliveries,
     fees,
-    failedTransactions,
-    bouncedMessages,
+    failedTransactions: trace.transactions.filter((tx) => !tx.success),
+    bouncedMessages: trace.transactions.flatMap((tx) => (tx.inMsg !== null && tx.inMsg.bounced ? [tx.inMsg] : [])),
     balanceChanges,
     jettonCredits,
   };
+}
+
+/**
+ * Judges the wallets that sent the request — the root, and any wallet it
+ * delivered a signed internal request to — on their own transactions and on
+ * the first hop of every message they sent.
+ */
+function judgeRequest(trace: TonTrace): { problem: TonRequestProblem | null; deliveries: TonMessageDelivery[] } {
+  const root = trace.transactions[0];
+  if (root === undefined) return { problem: { code: 'no_transaction', reason: 'the trace has no transaction' }, deliveries: [] };
+  const children = childrenByParent(trace.transactions);
+  const relayTargets = (children.get(root.hash) ?? []).filter((tx) => tx.inMsg?.opcode === TON_W5_SIGNED_INTERNAL_OP);
+
+  const deliveries: TonMessageDelivery[] = [];
+  let problem: TonRequestProblem | null = null;
+  const note = (found: TonRequestProblem): void => {
+    problem ??= found;
+  };
+  for (const wallet of [root, ...relayTargets]) {
+    if (!wallet.success) {
+      note(
+        wallet.skippedActions > 0
+          ? { code: 'skipped_actions', reason: `${wallet.account} skipped ${wallet.skippedActions} message(s) it could not send` }
+          : { code: String(wallet.computeExitCode ?? wallet.actionResultCode ?? 'failed'), reason: `${wallet.account} failed in ${wallet.hash}` },
+      );
+    }
+    const sent = wallet.outMsgs.filter((m) => m.destination !== null);
+    if (wallet !== root && wallet.success && sent.length === 0) {
+      note({ code: 'request_not_executed', reason: `${wallet.account} did not execute the relayed request (bad signature or seqno)` });
+    }
+    const received = [...(children.get(wallet.hash) ?? [])];
+    for (const message of sent) {
+      const index = received.findIndex((tx) => tx.account === message.destination && tx.inMsg?.value === message.value);
+      const receiver = index === -1 ? null : received.splice(index, 1)[0];
+      const outcome: TonDeliveryOutcome =
+        receiver === null
+          ? trace.complete
+            ? 'undelivered'
+            : 'pending'
+          : receiver.success || !message.bounce
+            ? 'delivered'
+            : 'bounced';
+      deliveries.push({
+        from: wallet.account,
+        to: message.destination as string,
+        value: message.value,
+        outcome,
+        transaction: receiver?.hash ?? null,
+      });
+      if (outcome === 'bounced' || outcome === 'undelivered') {
+        note({ code: outcome, reason: `a message from ${wallet.account} to ${message.destination} was ${outcome}` });
+      }
+    }
+  }
+  return { problem, deliveries };
+}
+
+function childrenByParent(transactions: readonly TonTraceTransaction[]): Map<string, TonTraceTransaction[]> {
+  const byParent = new Map<string, TonTraceTransaction[]>();
+  for (const tx of transactions) {
+    if (tx.parent === null) continue;
+    byParent.set(tx.parent, [...(byParent.get(tx.parent) ?? []), tx]);
+  }
+  return byParent;
 }
 
 function jettonCreditOf(account: string, inMsg: TonTraceMessage): TonJettonCredit | null {
@@ -107,7 +210,9 @@ export interface TonTransactionStatusInit {
  * Final — `Success` or `Failed` — only once the trace is complete and every
  * transaction in it is in a block a masterchain block references. TON's
  * consensus is final at that point; `masterchainDepth` lets a caller ask for
- * more anyway. `Failed` when any transaction failed or any message bounced.
+ * more anyway. `Failed` when the request did not do what it was signed for
+ * (see {@link TonTraceSummary.success}); a failed status still carries the
+ * summary, whose `deliveries` say which messages did arrive.
  */
 export class TonTransactionStatus extends TransactionStatus {
   readonly trace: TonTrace | null;
@@ -167,19 +272,7 @@ export class TonTransactionStatus extends TransactionStatus {
     if (summary.success) {
       return new TonTransactionStatus({ ...common, status: TransactionStatusTypes.Success, balanceChanges: summary.balanceChanges });
     }
-    const failed = summary.failedTransactions[0];
-    const error: TransactionErrorInfo =
-      failed === undefined
-        ? { code: 'bounced', reason: `${summary.bouncedMessages.length} message(s) bounced` }
-        : failed.skippedActions > 0
-          ? {
-              code: 'skipped_actions',
-              reason: `transaction ${failed.hash} on ${failed.account} skipped ${failed.skippedActions} message(s)`,
-            }
-          : {
-              code: String(failed.computeExitCode ?? failed.actionResultCode ?? 'failed'),
-              reason: `transaction ${failed.hash} on ${failed.account} failed`,
-            };
+    const error: TransactionErrorInfo = { ...(summary.problem as TonRequestProblem) };
     return new TonTransactionStatus({ ...common, status: TransactionStatusTypes.Failed, error });
   }
 }

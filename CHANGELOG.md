@@ -16,11 +16,11 @@ TON: a chain, W5 wallets, and requests one wallet signs and another delivers and
 
 - **`TonChain` and `TonMainnet`** (`@getomnichain/omnichain/ton`), read through TON Center v3 with TonAPI as the fallback. A call goes to TonAPI only when TON Center failed without an answer (transport, timeout, 429, 5xx). Every provider needs a key; a missing one is read from `TONCENTER_API_KEY` / `TONAPI_API_KEY`.
 - **`TonWallet`**: W5R1 on workchain 0, its key derived from a BIP-39 mnemonic with SLIP-0010 ed25519 at `m/44'/607'/<account>'`. `createExternalRequest` (sent and paid by the wallet itself) and `createInternalRequest` (signed for a relayer, op `0x73696e74`).
-- **Relaying:** `tonRelayMessage` delivers another wallet's signed request and carries its StateInit while it is undeployed, so the relayer deploys it on first use and pays every fee.
+- **Relaying:** `tonRelayMessage({ wallet, request, value, deploy })` delivers a wallet's signed request and, with `deploy`, its StateInit, so the relayer deploys it on first use and pays every fee.
 - **Messages:** `TonOutMessage`, `tonCommentBody`, `tonJettonTransferBody` (TEP-74), `tonNormalizedExternalHash` (TEP-467, the transaction id).
 - **Reads:** account state, seqno, TON and jetton balances, `getJettonWalletAddress`.
 - **`TonChain.emulate`**: the whole trace of an external message, signature ignored — fees, success, failed transactions, bounced messages, TON balance changes and jetton credits.
-- **`TonTransactionStatus`**: final once the trace is complete and every transaction is in a masterchain-referenced block, with no confirmation count; `Failed` when any transaction failed or any message bounced. `isRequestExpired` tells a request that can no longer land.
+- **`TonTransactionStatus`**: final once the trace is complete and every transaction is in a masterchain-referenced block, with no confirmation count. `Failed` when the request did not do what it was signed for — the sending (or relayed) wallet failed, skipped a message or did not execute the request, or a message it sent bounced or was undelivered; `summary.deliveries` gives each message's outcome. Failures further down the trace do not fail it. `isRequestExpired` tells a request that can no longer land.
 
 ### Changed
 

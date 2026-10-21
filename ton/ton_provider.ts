@@ -29,6 +29,8 @@ export interface TonTraceMessage {
 export interface TonTraceTransaction {
   /** Lowercase hex. */
   hash: string;
+  /** The transaction whose outgoing message this one received; `null` for the root. */
+  parent: string | null;
   /** Canonical raw address. */
   account: string;
   /**

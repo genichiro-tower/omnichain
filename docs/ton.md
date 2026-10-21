@@ -53,24 +53,19 @@ wallet.addressUserFriendly({ bounceable: false }); // UQ…
 
 `TonOutMessage` is `{ to, value, body?, bounce?, stateInit?, mode? }`; at most 255 per request. `bounce` defaults to whether there is a body; `mode` to `PAY_GAS_SEPARATELY`.
 
-Helpers: `tonCommentBody(text)`, `tonJettonTransferBody({ amount, destination, responseDestination, forwardTonAmount, forwardPayload })` (TEP-74, sent to the sender's own jetton wallet), and `tonRelayMessage({ to, request, value, stateInit })`.
+Helpers: `tonCommentBody(text)`, `tonJettonTransferBody({ amount, destination, responseDestination, forwardTonAmount, forwardPayload })` (TEP-74, sent to the sender's own jetton wallet), and `tonRelayMessage({ wallet, request, value, deploy })`.
 
 A relayer delivers another wallet's request and pays for it:
 
 ```ts
 const request = vault.createInternalRequest({ seqno: vaultSeqno, messages });
-const relay = tonRelayMessage({
-  to: vault.address,
-  request,
-  value: attachedNanotons,
-  stateInit: vaultDeployed ? undefined : vault.stateInit, // deploys it on first use
-});
+const relay = tonRelayMessage({ wallet: vault, request, value: attachedNanotons, deploy: !vaultDeployed });
 const signed = feePayer.createExternalRequest({ seqno: feePayerSeqno, messages: [relay], deploy: !feePayerDeployed });
 const emulation = await ton.emulate(signed.boc); // fees and outcome before sending
 const hash = await ton.broadcast(signed.boc);
 ```
 
-The relay message is bounceable: a request the target refuses returns the value to the relayer.
+The relay message is bounceable: a request that fails in the target returns the value to the relayer. A request the target does not accept (a bad signature, a stale seqno) is dropped without a bounce — the target keeps the value — and the status reports it as `request_not_executed`.
 
 ## Reading state
 
@@ -81,12 +76,13 @@ The relay message is bounceable: a request the target refuses returns the value 
 
 ## Emulation, broadcast and status
 
-- `emulate(boc)` emulates the external message's whole trace with the signature ignored, deploys and downstream hops included. It returns `success` (every transaction succeeded, nothing bounced), `fees` (every transaction's fees plus the forward fees its messages carried), the failed transactions and bounced messages, native TON balance changes and `jettonCredits`. A message the target would refuse outright throws `SimulationFailed`.
+- `emulate(boc)` emulates the external message's whole trace with the signature ignored, deploys and downstream hops included. It returns `success` and `problem` (judged as for the status below), `deliveries`, `fees` (every transaction's fees plus the forward fees its messages carried), the failed transactions and bounced messages, native TON balance changes and `jettonCredits`. A message the target would refuse outright throws `SimulationFailed`.
 - `broadcast(boc)` returns the **normalized external-message hash** (TEP-467, lowercase hex), the transaction id on both providers.
 - `getTransactionStatus(hash, { minMasterchainDepth })` reads the whole trace:
   - `Pending` until the trace is complete and every transaction is in a block a masterchain block references; there is no confirmation count, because TON's consensus is final at that point (`minMasterchainDepth`, 0 by default, asks for more);
-  - `Failed` when any transaction failed or any message bounced;
+  - `Failed` when the request did not do what it was signed for: the sending wallet's transaction (or, for a relayed request, the target wallet's) failed or skipped a message (`skipped_actions`), the target did not execute the request (`request_not_executed`), or a message those wallets sent `bounced` or was `undelivered`;
   - `Success` otherwise, with the TON balance changes, `fees`, `jettonCredits`, the trace, `masterchainSeqno` and `masterchainDepth`.
+- `summary.deliveries` lists every message the sending wallets sent with its outcome (`delivered`, `bounced`, `undelivered`, `pending`); a failed status carries it too, so a caller can tell which messages arrived. A non-bounceable message is `delivered` even when its receiver then fails — the value stays there. Failures further down the trace (a recipient that throws on a jetton notification, a skipped excess refund) do not undo deliveries; they are in `failedTransactions` / `bouncedMessages` and do not fail the status.
 - A transaction succeeds when its compute phase succeeded — or was skipped only because the account has no code yet, a plain transfer to an undeployed address — and its action phase, if any, succeeded.
 - `isRequestExpired({ wallet, seqno, validUntil })` — true once `validUntil` has passed and the wallet's seqno never moved past the request's: the request can no longer land.
 

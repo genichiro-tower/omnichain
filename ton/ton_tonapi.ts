@@ -88,7 +88,7 @@ export class TonapiProvider implements TonProvider {
     const error = errorMessageOf(reply);
     if (error !== null) throw definiteError(ChainErrorKinds.SimulationFailed, `${NAME} emulation failed: ${error}`);
     const root = reply as TonapiTraceNode;
-    return { complete: true, transactions: flatten(root).map((tx) => toTransaction(tx, null)) };
+    return { complete: true, transactions: flatten(root).map(({ tx, parent }) => toTransaction(tx, parent, null)) };
   }
 
   async getMasterchainSeqno(): Promise<number> {
@@ -103,13 +103,13 @@ export class TonapiProvider implements TonProvider {
    * masterchain block the shard block points back to, which can be a few
    * blocks before the one TON Center reports as committing it.
    */
-  private async withMasterchainSeqnos(transactions: Record<string, unknown>[]): Promise<TonTraceTransaction[]> {
+  private async withMasterchainSeqnos(transactions: FlatTransaction[]): Promise<TonTraceTransaction[]> {
     const masterRefs = new Map<string, number | null>();
-    for (const tx of transactions) {
+    for (const { tx } of transactions) {
       const block = String(tx.block ?? '');
       if (!masterRefs.has(block)) masterRefs.set(block, await this.masterchainSeqnoOf(block));
     }
-    return transactions.map((tx) => toTransaction(tx, masterRefs.get(String(tx.block ?? '')) ?? null));
+    return transactions.map(({ tx, parent }) => toTransaction(tx, parent, masterRefs.get(String(tx.block ?? '')) ?? null));
   }
 
   private async masterchainSeqnoOf(block: string): Promise<number | null> {
@@ -141,13 +141,20 @@ export class TonapiProvider implements TonProvider {
   }
 }
 
-function flatten(root: TonapiTraceNode): Record<string, unknown>[] {
-  const ordered: Record<string, unknown>[] = [];
-  const queue: TonapiTraceNode[] = [root];
+interface FlatTransaction {
+  tx: Record<string, unknown>;
+  parent: string | null;
+}
+
+function flatten(root: TonapiTraceNode): FlatTransaction[] {
+  const ordered: FlatTransaction[] = [];
+  const queue: Array<{ node: TonapiTraceNode; parent: string | null }> = [{ node: root, parent: null }];
   while (queue.length > 0) {
-    const node = queue.shift() as TonapiTraceNode;
-    ordered.push(asRecord(node.transaction, 'transaction'));
-    queue.push(...(node.children ?? []));
+    const { node, parent } = queue.shift() as { node: TonapiTraceNode; parent: string | null };
+    const tx = asRecord(node.transaction, 'transaction');
+    ordered.push({ tx, parent });
+    const hash = rawTransactionOf(tx).hash().toString('hex');
+    queue.push(...(node.children ?? []).map((child) => ({ node: child, parent: hash })));
   }
   return ordered;
 }
@@ -171,7 +178,7 @@ function rawTransactionOf(tx: Record<string, unknown>): Transaction {
   return loadTransaction(Cell.fromBoc(Buffer.from(tx.raw, 'hex'))[0].beginParse());
 }
 
-function toTransaction(tx: Record<string, unknown>, mcSeqno: number | null): TonTraceTransaction {
+function toTransaction(tx: Record<string, unknown>, parent: string | null, mcSeqno: number | null): TonTraceTransaction {
   const raw = rawTransactionOf(tx);
   const compute = tx.compute_phase === undefined ? null : asRecord(tx.compute_phase, 'compute_phase');
   const action = tx.action_phase === undefined || tx.action_phase === null ? null : asRecord(tx.action_phase, 'action_phase');
@@ -180,6 +187,7 @@ function toTransaction(tx: Record<string, unknown>, mcSeqno: number | null): Ton
   const actionOk = action === null || (action.success === true && skippedActions === 0);
   return {
     hash: raw.hash().toString('hex'),
+    parent,
     account: tonRawAddress(String(asRecord(tx.account, 'account').address)),
     success: computeOk && actionOk,
     skippedActions,

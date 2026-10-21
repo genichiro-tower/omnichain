@@ -54,11 +54,17 @@ describe('TON messages', () => {
     expect(call.outMsg.info.type === 'internal' && call.outMsg.info.bounce).toBe(true);
   });
 
-  it('makes a bounceable relay message that can deploy its target', () => {
+  it("makes a bounceable relay message that deploys its target only when asked", () => {
     const request = tonCommentBody('request');
-    const stateInit = { code: tonCommentBody('code'), data: tonCommentBody('data') };
-    const relay = tonRelayMessage({ to: OWNER, request, value: 50_000_000n, stateInit });
-    expect(relay).toEqual({ to: OWNER, value: 50_000_000n, body: request, bounce: true, stateInit });
+    const wallet = { address: OWNER, stateInit: { code: tonCommentBody('code'), data: tonCommentBody('data') } };
+    expect(tonRelayMessage({ wallet, request, value: 50_000_000n, deploy: true })).toEqual({
+      to: OWNER,
+      value: 50_000_000n,
+      body: request,
+      bounce: true,
+      stateInit: wallet.stateInit,
+    });
+    expect(tonRelayMessage({ wallet, request, value: 1n, deploy: false }).stateInit).toBeUndefined();
   });
 
   it('refuses a negative value', () => {

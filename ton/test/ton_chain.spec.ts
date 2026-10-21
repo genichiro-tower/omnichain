@@ -7,7 +7,7 @@ import { CHAIN_ID_TON_MAINNET } from '../../chain_ids.ts';
 import { ChainErrorKinds } from '../../errors.ts';
 import { TransactionStatusTypes } from '../../transaction_status.ts';
 import { TonChain } from '../ton_chain.ts';
-import { TON_JETTON_INTERNAL_TRANSFER_OP, TON_JETTON_TRANSFER_OP } from '../ton_messages.ts';
+import { TON_JETTON_INTERNAL_TRANSFER_OP, TON_JETTON_TRANSFER_OP, TON_W5_SIGNED_INTERNAL_OP } from '../ton_messages.ts';
 import type { TonAccountState, TonProvider, TonTrace, TonTraceTransaction } from '../ton_provider.ts';
 import { ToncenterProvider } from '../ton_toncenter.ts';
 import { TonTransactionStatus, summarizeTonTrace } from '../ton_transaction_status.ts';
@@ -77,23 +77,82 @@ describe('TonTransactionStatus', () => {
     expect(at(trace, 9)).toBe(TransactionStatusTypes.Success);
   });
 
-  it('is Failed when a message bounced', async () => {
+  it('is Failed when a message the wallet sent bounced', async () => {
     const trace = await realTrace();
     const [root, child] = trace.transactions;
-    const bounce: TonTraceTransaction = {
-      ...root,
-      hash: 'cc'.repeat(32),
-      inMsg: { ...(child.inMsg as NonNullable<TonTraceTransaction['inMsg']>), source: child.account, destination: root.account, bounced: true },
-      outMsgs: [],
-    };
     const status = TonTransactionStatus.fromTrace({
       chainId: CHAIN_ID_TON_MAINNET,
-      trace: { complete: true, transactions: [root, child, bounce] },
+      trace: {
+        complete: true,
+        transactions: [{ ...root, outMsgs: [{ ...root.outMsgs[0], bounce: true }] }, { ...child, success: false }],
+      },
       masterchainTip: 100472540,
     });
     expect(status.status).toBe(TransactionStatusTypes.Failed);
     expect(status.error?.code).toBe('bounced');
-    expect(status.summary?.bouncedMessages).toHaveLength(1);
+    expect(status.summary?.deliveries).toEqual([
+      expect.objectContaining({ from: root.account, to: child.account, outcome: 'bounced', transaction: child.hash }),
+    ]);
+  });
+
+  it('stays Success when a recipient fails on a non-bounceable message or further down', async () => {
+    const trace = await realTrace();
+    const [root, child] = trace.transactions;
+    const downstream: TonTraceTransaction = { ...child, hash: 'dd'.repeat(32), parent: child.hash, success: false };
+    const status = TonTransactionStatus.fromTrace({
+      chainId: CHAIN_ID_TON_MAINNET,
+      trace: { complete: true, transactions: [root, { ...child, success: false }, downstream] },
+      masterchainTip: 100472540,
+    });
+    expect(status.status).toBe(TransactionStatusTypes.Success);
+    expect(status.summary?.deliveries[0].outcome).toBe('delivered');
+    expect(status.summary?.failedTransactions).toHaveLength(2);
+  });
+
+  it('is Failed when a relayed request was not executed', async () => {
+    const trace = await realTrace();
+    const [root, child] = trace.transactions;
+    const target: TonTraceTransaction = {
+      ...child,
+      inMsg: { ...(child.inMsg as NonNullable<TonTraceTransaction['inMsg']>), opcode: TON_W5_SIGNED_INTERNAL_OP, bounce: true },
+      outMsgs: [],
+    };
+    const status = TonTransactionStatus.fromTrace({
+      chainId: CHAIN_ID_TON_MAINNET,
+      trace: { complete: true, transactions: [root, target] },
+      masterchainTip: 100472540,
+    });
+    expect(status.status).toBe(TransactionStatusTypes.Failed);
+    expect(status.error?.code).toBe('request_not_executed');
+  });
+
+  it("judges a relayed request's own messages", async () => {
+    const trace = await realTrace();
+    const [root, child] = trace.transactions;
+    const payout = { ...root.outMsgs[0], source: child.account, destination: OTHER, value: 7n, bounce: true };
+    const target: TonTraceTransaction = {
+      ...child,
+      inMsg: { ...(child.inMsg as NonNullable<TonTraceTransaction['inMsg']>), opcode: TON_W5_SIGNED_INTERNAL_OP },
+      outMsgs: [payout],
+    };
+    const received: TonTraceTransaction = {
+      ...child,
+      hash: 'ee'.repeat(32),
+      parent: child.hash,
+      account: OTHER,
+      inMsg: { ...payout },
+      outMsgs: [],
+    };
+    const judge = (receiver: TonTraceTransaction | null, complete = true): TonTransactionStatus =>
+      TonTransactionStatus.fromTrace({
+        chainId: CHAIN_ID_TON_MAINNET,
+        trace: { complete, transactions: receiver === null ? [root, target] : [root, target, receiver] },
+        masterchainTip: 100472540,
+      });
+    expect(judge(received).status).toBe(TransactionStatusTypes.Success);
+    expect(judge(received).summary?.deliveries.map((d) => d.outcome)).toEqual(['delivered', 'delivered']);
+    expect(judge({ ...received, success: false }).error?.code).toBe('bounced');
+    expect(judge(null).error?.code).toBe('undelivered');
   });
 
   it('is Failed when a wallet skipped a message it could not send', async () => {

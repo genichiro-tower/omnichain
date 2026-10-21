@@ -95,24 +95,40 @@ export function tonJettonTransferBody(args: TonJettonTransferBodyArgs): Cell {
     : builder.storeBit(true).storeRef(args.forwardPayload).endCell();
 }
 
+export const TON_W5_SIGNED_INTERNAL_OP = 0x73696e74;
+
+/** The wallet a relay delivers to: its address and the StateInit that deploys it (a `TonWallet` fits). */
+export interface TonRelayTarget {
+  address: string;
+  stateInit: StateInit;
+}
+
 export interface TonRelayMessageArgs {
-  /** The wallet the relayed request is for. */
-  to: string;
-  /** Its signed internal request (`TonWallet.createInternalRequest`). */
+  wallet: TonRelayTarget;
+  /** The wallet's own signed internal request (`TonWallet.createInternalRequest`). */
   request: Cell;
   /** Nanotons the relayer attaches: the trace's fees plus whatever the request's messages need. */
   value: bigint;
-  /** The target's StateInit; set it while the target is not deployed, and the relay deploys it. */
-  stateInit?: StateInit;
+  /** Attach the wallet's StateInit, deploying it; set while it is not deployed. */
+  deploy: boolean;
 }
 
 /**
- * The message a relayer sends to deliver another wallet's signed internal
- * request. Bounceable, so a request the target refuses returns the value to
- * the relayer.
+ * The message a relayer sends to deliver a wallet's signed internal request.
+ *
+ * Bounceable, so a request that fails in the wallet returns the value. A
+ * request the wallet does not accept (a bad signature, a stale seqno) is
+ * dropped without a bounce and the wallet keeps the value; the transaction
+ * status reports that as `request_not_executed`.
  */
 export function tonRelayMessage(args: TonRelayMessageArgs): TonOutMessage {
-  return { to: args.to, value: args.value, body: args.request, bounce: true, stateInit: args.stateInit };
+  return {
+    to: args.wallet.address,
+    value: args.value,
+    body: args.request,
+    bounce: true,
+    stateInit: args.deploy ? args.wallet.stateInit : undefined,
+  };
 }
 
 /**
