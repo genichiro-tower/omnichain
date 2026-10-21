@@ -82,11 +82,18 @@ afterwards whether it did.
       (`TonBroadcastUncertainError`, with the hash): the message may land,
       so the caller reads its status or waits for `isRequestExpired`
       before signing a replacement;
+    - a broadcast reply is read by the lite server's text, not its HTTP
+      status (TON Center sends both as 500): "cannot apply external
+      message" is a definite `BroadcastRejected`; "duplicate message" means
+      the network has it, and counts as sent;
     - a definite answer from TON Center, such as "not found" or a failed
       emulation, is never second-guessed by TonAPI;
     - without a TonAPI config, there is no fallback.
   - Results from either provider are normalized to the same types, so a
-    caller cannot tell which one answered, except from a log line.
+    caller cannot tell which one answered, except from a log line (an empty
+    message body is `null` on both). A TonAPI trace that is its emulation of
+    a message still in flight (`emulated`) is read as no trace; an emulated
+    hop leaves the trace incomplete.
 - **R3. Addresses.** `TonAddress` gains:
   - one canonical form, raw `0:<hex>` lowercase, so `canonical()` makes two
     forms of one address compare equal;
