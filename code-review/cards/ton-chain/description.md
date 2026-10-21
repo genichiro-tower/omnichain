@@ -77,7 +77,11 @@ afterwards whether it did.
       timeout, 429, 5xx) is retried once on TonAPI;
     - a broadcast that fails on TON Center is sent to TonAPI with the same
       BOC. That is safe: the seqno makes a second landing impossible, and
-      the id is the same normalized hash on both;
+      the id is the same normalized hash on both. If TonAPI then refuses
+      it, or there is no fallback, the broadcast is **uncertain**
+      (`TonBroadcastUncertainError`, with the hash): the message may land,
+      so the caller reads its status or waits for `isRequestExpired`
+      before signing a replacement;
     - a definite answer from TON Center, such as "not found" or a failed
       emulation, is never second-guessed by TonAPI;
     - without a TonAPI config, there is no fallback.
@@ -286,8 +290,12 @@ PR: `getomnichain/omnichain#17` (`genichiro-tower:feature/ton-chain` →
   `bounced`, `undelivered`, `jetton_bounced`, `jetton_undelivered`.
 - **R8, matching:** each message a sending wallet sent is matched to the
   transaction that received it by (source, `created_lt`), which names one
-  message; destination and value must then agree, or the status throws an
-  inconsistent-trace `RpcError`. Matching by destination and value paired
+  message. Each provider checks a trace before returning it: every internal
+  message names its source and `created_lt`, and every transaction received
+  a message its parent sent, to that account, with that value. A trace that
+  breaks this fails retryably, so it is read from TonAPI instead. A TON
+  Center trace with a transaction left out is incomplete, and that
+  transaction stays its children's parent. Matching by destination and value paired
   identical messages arbitrarily (a vault's jetton transfers all go to its
   own jetton wallet with the same attached TON). `summary.deliveries` is
   ordered as each wallet sent its messages, the request's order.
@@ -311,14 +319,16 @@ PR: `getomnichain/omnichain#17` (`genichiro-tower:feature/ton-chain` →
     headers.
   - AC6 (a refunded jetton transfer) is covered by hand-built traces only;
     recording one needs jettons on the fee payer.
+- **R8, expiry:** `isRequestExpired({ wallet, seqno, validUntil, hash })`
+  uses the chain's clock (the masterchain head's time, 60 s margin), the
+  wallet's seqno and the absence of a trace, never the local clock.
 - The root entry exports only `TonAddress`; the family is `./ton`.
 
 ---
 
 # Follow-ups raised
 
-The review's remaining Medium items (PR #17, "Known open items"): broadcast
-fallback after a landed message, `isRequestExpired` clock and lag, `{ index }`,
+The review's remaining Medium items (PR #17, "Known open items"): `{ index }`,
 aborted-without-bounce, 404 / failed get-method read as 0, `jettonCredits` /
 `failedTransactions` predicates, emulation `ignoreSignature` and sender fees,
 native bounce flag, pinned `@ton/*`, the fallback log line.
