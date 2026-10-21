@@ -96,9 +96,11 @@ afterwards whether it did.
 
   The validator's existing behaviour is kept for valid inputs.
 - **R4. Wallets.**
-  - `TonWallet.fromMnemonic(mnemonic, { index })` derives an ed25519 key with
-    SLIP-0010 at `m/44'/607'/{index}'` from a **BIP-39** seed, the same way
-    Solana's derivation works.
+  - `TonWallet.fromMnemonic(mnemonic, { derivationPath })` derives an
+    ed25519 key with SLIP-0010 at a hardened path from a **BIP-39** seed.
+    `TonWallet.derivationPath({ account })` gives `m/44'/607'/{account}'`
+    (the default is account 0), the same shape as Tron's and Stellar's
+    `fromMnemonic` / `derivationPath`.
   - It exposes `publicKey` and the W5R1 `address` (workchain 0, the mainnet
     client wallet id).
   - It exposes `stateInit()`.
@@ -166,8 +168,9 @@ afterwards whether it did.
   `canonical()`. `toUserFriendly({ bounceable: false })` gives the `UQ…`
   form.
 - **AC2 (R4)** For a fixed BIP-39 mnemonic, `TonWallet.fromMnemonic(m,
-  { index: i })` gives fixed addresses (test vectors). Each equals
-  `WalletContractV5R1.create({ publicKey, workchain: 0 })`. Indices 0 and 1
+  { derivationPath: TonWallet.derivationPath({ account: i }) })` gives fixed
+  addresses (test vectors). Each equals
+  `WalletContractV5R1.create({ publicKey, workchain: 0 })`. Accounts 0 and 1
   differ.
 - **AC3 (R5, R7) Mainnet, emulation only.** A relay from a funded fee payer
   to an undeployed deposit wallet, with `deploy: true` and one TON transfer
@@ -278,10 +281,7 @@ afterwards whether it did.
 PR: `getomnichain/omnichain#17` (`genichiro-tower:feature/ton-chain` →
 `main`), opened from a fork: `genichiro-tower` has read access only.
 
-- **R4:** `fromMnemonic(m, { derivationPath })` with
-  `TonWallet.derivationPath({ account })`, as Tron and Stellar do, not
-  `{ index }`; `stateInit` is a getter and verification is
-  `verifySignature`.
+- **R4:** `stateInit` is a getter and verification is `verifySignature`.
 - **R5:** the relay is `tonRelayMessage({ wallet, request, value, deploy })`.
 - **R8:** the status judges the request on the wallets that sent it and the
   first hop of each message they sent (a jetton transfer at the receiver's
@@ -333,7 +333,7 @@ PR: `getomnichain/omnichain#17` (`genichiro-tower:feature/ton-chain` →
 
 # Follow-ups raised
 
-The review's remaining Medium items (PR #17, "Known open items"): `{ index }`,
+The review's remaining Medium items (PR #17, "Known open items"):
 aborted-without-bounce, 404 / failed get-method read as 0, `jettonCredits` /
 `failedTransactions` predicates, emulation `ignoreSignature` and sender fees,
 native bounce flag, pinned `@ton/*`, the fallback log line.
