@@ -7,7 +7,7 @@ import { TON_JETTON_TRANSFER_OP } from '../ton_messages.ts';
 import { type TonAccountState, TonBroadcastUncertainError, TonFallbackProvider, type TonProvider, TonProviderError } from '../ton_provider.ts';
 import { TonUnsignedTransaction } from '../ton_transactions.ts';
 import { TonWallet } from '../ton_wallet.ts';
-import { JETTON_WALLET, MNEMONIC, OTHER, USDT_MASTER } from './ton_test_helpers.ts';
+import { JETTON_WALLET, MNEMONIC, OTHER, USDT_MASTER, realTrace } from './ton_test_helpers.ts';
 
 function fakeProvider(overrides: Partial<TonProvider> = {}): TonProvider {
   return {
@@ -97,54 +97,81 @@ describe('TonChain', () => {
     await expect(chainWith(fakeProvider()).getTransactionStatus('ABC')).rejects.toThrow(/64 lowercase hex/);
   });
 
-  it('calls a request expired only on chain time past validUntil, the seqno unmoved and no trace', async () => {
+  describe('getRequestState', () => {
     const hash = 'ab'.repeat(32);
     const validUntil = 1_000;
-    const at = (utime: number, overrides: Partial<TonProvider> = {}): TonChain =>
-      chainWith(fakeProvider({ getSeqno: async () => 3, getMasterchainHead: async () => ({ seqno: 100, utime }), ...overrides }));
     const past = validUntil + REQUEST_EXPIRY_MARGIN_SECONDS + 1;
-    await expect(at(past).isRequestExpired({ wallet: OTHER, seqno: 3, validUntil, hash })).resolves.toBe(true);
-    // This machine's clock is far ahead; the chain's is not.
-    await expect(at(validUntil + 1).isRequestExpired({ wallet: OTHER, seqno: 3, validUntil, hash })).resolves.toBe(false);
-    await expect(at(past).isRequestExpired({ wallet: OTHER, seqno: 2, validUntil, hash })).resolves.toBe(false);
-    const landed = at(past, { getTrace: async () => ({ complete: false, transactions: [] }) });
-    await expect(landed.isRequestExpired({ wallet: OTHER, seqno: 3, validUntil, hash })).resolves.toBe(false);
-    // A seqno that could not be read is an error, not an unmoved seqno.
-    const unreadable = at(past, {
-      getSeqno: async () => {
-        throw new TonProviderError(ChainErrorKinds.RpcError, 'could not run seqno', true);
-      },
+    const at = (utime: number, seqno: number, overrides: Partial<TonProvider> = {}): TonChain =>
+      chainWith(fakeProvider({ getSeqno: async () => seqno, getMasterchainHead: async () => ({ seqno: 100, utime }), ...overrides }));
+
+    it('is expired only on chain time past validUntil, the seqno not past the request and no trace', async () => {
+      await expect(at(past, 3).getRequestState({ wallet: OTHER, seqno: 3, validUntil, hash })).resolves.toBe('expired');
+      // Requests before it never executed either: still expired.
+      await expect(at(past, 1).getRequestState({ wallet: OTHER, seqno: 3, validUntil, hash })).resolves.toBe('expired');
+      // This machine's clock is far ahead; the chain's is not.
+      await expect(at(validUntil + 1, 3).getRequestState({ wallet: OTHER, seqno: 3, validUntil, hash })).resolves.toBe('live');
     });
-    await expect(unreadable.isRequestExpired({ wallet: OTHER, seqno: 3, validUntil, hash })).rejects.toThrow('could not run seqno');
-  });
 
-  it('reads all of an expiry check from one provider', async () => {
-    const validUntil = 1_000;
-    const past = validUntil + REQUEST_EXPIRY_MARGIN_SECONDS + 1;
-    const unavailable = (): never => {
-      throw new TonProviderError(ChainErrorKinds.RpcError, 'HTTP 503', true);
-    };
-    // The primary answers the head, then fails the seqno: everything is asked again of the fallback.
-    const primaryHead = jest.fn(async () => ({ seqno: 100, utime: past }));
-    const primary = fakeProvider({ getMasterchainHead: primaryHead, getSeqno: async () => unavailable() });
-    const fallbackHead = jest.fn(async () => ({ seqno: 90, utime: validUntil }));
-    const fallback = fakeProvider({ getMasterchainHead: fallbackHead, getSeqno: async () => 3 });
-    const chain = chainWith(new TonFallbackProvider(primary, fallback));
-    // The fallback's own clock is not past validUntil yet, so it is not expired.
-    await expect(chain.isRequestExpired({ wallet: OTHER, seqno: 3, validUntil, hash: 'ab'.repeat(32) })).resolves.toBe(false);
-    expect(fallbackHead).toHaveBeenCalled();
-  });
+    it('is consumed once the seqno moved past it or the request has a trace, however late it is', async () => {
+      await expect(at(past, 4).getRequestState({ wallet: OTHER, seqno: 3, validUntil, hash })).resolves.toBe('consumed');
+      await expect(at(validUntil, 4).getRequestState({ wallet: OTHER, seqno: 3, validUntil, hash })).resolves.toBe('consumed');
+      const traced = at(past, 3, { getTrace: async () => ({ complete: false, transactions: [] }) });
+      await expect(traced.getRequestState({ wallet: OTHER, seqno: 3, validUntil, hash })).resolves.toBe('consumed');
+    });
 
-  it('keeps a relayed request alive until chain time passes it with the seqno unmoved, whatever its status', async () => {
-    const validUntil = 1_000;
-    const at = (utime: number, seqno: number): TonChain =>
-      chainWith(fakeProvider({ getSeqno: async () => seqno, getMasterchainHead: async () => ({ seqno: 100, utime }) }));
-    const past = validUntil + REQUEST_EXPIRY_MARGIN_SECONDS + 1;
-    // A failed relayed request leaves the seqno where it was: still valid before validUntil.
-    await expect(at(validUntil - 10, 5).isRelayedRequestExpired({ wallet: OTHER, seqno: 5, validUntil })).resolves.toBe(false);
-    await expect(at(past, 5).isRelayedRequestExpired({ wallet: OTHER, seqno: 5, validUntil })).resolves.toBe(true);
-    // The seqno moved past it: it, or another request with its seqno, executed.
-    await expect(at(past, 6).isRelayedRequestExpired({ wallet: OTHER, seqno: 5, validUntil })).resolves.toBe(false);
+    it('keeps a relayed request that failed live until chain time passes it, and calls it consumed once it executed', async () => {
+      // A failed relayed request leaves the wallet's seqno where it was.
+      await expect(at(validUntil - 10, 5).getRequestState({ wallet: OTHER, seqno: 5, validUntil })).resolves.toBe('live');
+      await expect(at(past, 5).getRequestState({ wallet: OTHER, seqno: 5, validUntil })).resolves.toBe('expired');
+      // Delivered again and executed: the seqno moved.
+      await expect(at(past, 6).getRequestState({ wallet: OTHER, seqno: 5, validUntil })).resolves.toBe('consumed');
+    });
+
+    it("refuses a relay's hash given for the relayed wallet, whose request may still be live", async () => {
+      const trace = await realTrace();
+      const relayer = trace.transactions[0].account;
+      const chain = at(validUntil, 5, { getTrace: async () => trace });
+      await expect(chain.getRequestState({ wallet: OTHER, seqno: 5, validUntil, hash })).rejects.toMatchObject({
+        kind: ChainErrorKinds.InvalidArgument,
+        message: expect.stringContaining('for a relayed request pass no hash'),
+      });
+      await expect(chain.getRequestState({ wallet: relayer, seqno: 5, validUntil, hash })).resolves.toBe('consumed');
+    });
+
+    it('throws on a read that failed rather than answering', async () => {
+      const unreadable = at(past, 3, {
+        getSeqno: async () => {
+          throw new TonProviderError(ChainErrorKinds.RpcError, 'could not run seqno', true);
+        },
+      });
+      await expect(unreadable.getRequestState({ wallet: OTHER, seqno: 3, validUntil, hash })).rejects.toThrow('could not run seqno');
+    });
+
+    it.each(['AB'.repeat(32), 'ab'.repeat(31), Buffer.from('ab'.repeat(32), 'hex').toString('base64'), `${'ab'.repeat(32)}x`])(
+      'refuses the malformed hash %s instead of finding no trace',
+      async (malformed) => {
+        const getTrace = jest.fn(async () => null);
+        const chain = at(past, 3, { getTrace });
+        await expect(chain.getRequestState({ wallet: OTHER, seqno: 3, validUntil, hash: malformed })).rejects.toMatchObject({
+          kind: ChainErrorKinds.InvalidArgument,
+        });
+        expect(getTrace).not.toHaveBeenCalled();
+      },
+    );
+
+    it('reads everything from one provider', async () => {
+      const unavailable = (): never => {
+        throw new TonProviderError(ChainErrorKinds.RpcError, 'HTTP 503', true);
+      };
+      // The primary answers the seqno, then fails the trace: everything is asked again of the fallback.
+      const primary = fakeProvider({ getSeqno: async () => 3, getTrace: async () => unavailable(), getMasterchainHead: async () => ({ seqno: 100, utime: past }) });
+      const fallbackHead = jest.fn(async () => ({ seqno: 90, utime: validUntil }));
+      const fallback = fakeProvider({ getSeqno: async () => 3, getMasterchainHead: fallbackHead });
+      const chain = chainWith(new TonFallbackProvider(primary, fallback));
+      // The fallback's own clock is not past validUntil yet.
+      await expect(chain.getRequestState({ wallet: OTHER, seqno: 3, validUntil, hash })).resolves.toBe('live');
+      expect(fallbackHead).toHaveBeenCalled();
+    });
   });
 
   it('reads TON and jetton balances', async () => {

@@ -20,6 +20,7 @@ import {
   type TonProvider,
   TonProviderError,
   type TonTrace,
+  assertTonTxHash,
 } from './ton_provider.ts';
 import { ToncenterProvider } from './ton_toncenter.ts';
 import { TonapiProvider } from './ton_tonapi.ts';
@@ -36,6 +37,9 @@ export const DEFAULT_JETTON_FORWARD_NANOTON = 1n;
  * the masterchain head by a few seconds.
  */
 export const REQUEST_EXPIRY_MARGIN_SECONDS = 60;
+
+/** Where a signed request stands; see `TonChain.getRequestState`. */
+export type TonRequestState = 'live' | 'expired' | 'consumed';
 
 export interface TonProviderEndpoint {
   url: string;
@@ -280,47 +284,62 @@ export class TonChain extends Chain {
   }
 
   /**
-   * Whether the external request `hash` that `wallet` signed with `seqno` and
-   * `validUntil` can no longer land, so signing a replacement cannot pay twice:
-   * the chain's own time (not this machine's) is past `validUntil` by a
-   * margin, the wallet's seqno never moved past the request's, and no trace of
-   * it exists. All three are read from one provider.
+   * Where a signed request stands, so it is never replaced while it can still
+   * execute — the one check to make before signing a replacement, after a
+   * `Failed` relayed request or an uncertain broadcast:
+   * - `consumed`: the wallet's seqno has moved past the request's, or (given
+   *   `hash`, for an external request) the request has a trace. It executed —
+   *   or another request signed with the same seqno did. Do not re-sign it;
+   *   read its status (`getTransactionStatus(hash)`, or the relay's).
+   * - `expired`: the chain's own time (not this machine's) is past
+   *   `validUntil` by {@link REQUEST_EXPIRY_MARGIN_SECONDS}, with the seqno
+   *   not moved past it and no trace. It can never execute; replacing it is
+   *   safe.
+   * - `live`: neither yet. It can still execute — a relayed request that
+   *   failed included: W5 keeps an internal request's seqno only when the
+   *   transaction succeeds, so anyone can deliver it again from the trace
+   *   until `validUntil`.
    *
-   * For a relay this covers the relayer's request only; each request it
-   * carried needs `isRelayedRequestExpired`.
+   * `wallet` is the wallet that signed it: the sender of an external request,
+   * the target of a relayed one (pass no `hash` for a relayed request; a
+   * relay's own hash is the relayer's request). All reads come from one
+   * provider.
    */
-  isRequestExpired(args: { wallet: string; seqno: number; validUntil: number; hash: string }): Promise<boolean> {
-    return this.onOneProvider('isRequestExpired', async (provider) => {
-      if (!(await this.chainTimeIsPast(provider, args.validUntil))) return false;
-      if ((await provider.getSeqno(tonRawAddress(args.wallet))) > args.seqno) return false;
-      return (await provider.getTrace(args.hash)) === null;
+  async getRequestState(args: { wallet: string; seqno: number; validUntil: number; hash?: string }): Promise<TonRequestState> {
+    if (args.hash !== undefined) this.assertTxHash(args.hash);
+    const wallet = tonRawAddress(args.wallet);
+    return this.onOneProvider('getRequestState', async (provider) => {
+      if ((await provider.getSeqno(wallet)) > args.seqno) return 'consumed';
+      const trace = args.hash === undefined ? null : await provider.getTrace(args.hash);
+      if (trace !== null) {
+        // A relay's hash names the relayer's request, not the relayed one: its
+        // trace says nothing about whether the target's request executed.
+        const root = trace.transactions[0];
+        if (root !== undefined && root.parent === null && root.account !== wallet) {
+          throw new ChainError(
+            ChainErrorKinds.InvalidArgument,
+            `${args.hash} is a request of ${root.account}, not of ${wallet}; for a relayed request pass no hash`,
+            { chainId: this.chainId, txHash: args.hash },
+          );
+        }
+        return 'consumed';
+      }
+      const head = await provider.getMasterchainHead();
+      return head.utime > args.validUntil + REQUEST_EXPIRY_MARGIN_SECONDS ? 'expired' : 'live';
     });
   }
 
-  /**
-   * Whether a request `wallet` signed for a relayer (`createInternalRequest`)
-   * with `seqno` and `validUntil` can no longer execute. A relayed request
-   * that failed in the wallet leaves its seqno unchanged — W5 keeps the seqno
-   * of an internal request only when the transaction succeeds — so it stays
-   * valid, and anyone can deliver it again from the trace, until `validUntil`.
-   * A `Failed` status does not end it; this does: the chain's time is past
-   * `validUntil` by a margin and the wallet's seqno never moved past the
-   * request's. Both are read from one provider.
-   */
-  isRelayedRequestExpired(args: { wallet: string; seqno: number; validUntil: number }): Promise<boolean> {
-    return this.onOneProvider('isRelayedRequestExpired', async (provider) => {
-      if (!(await this.chainTimeIsPast(provider, args.validUntil))) return false;
-      return (await provider.getSeqno(tonRawAddress(args.wallet))) <= args.seqno;
-    });
+  private assertTxHash(hash: string): void {
+    try {
+      assertTonTxHash(hash);
+    } catch (err) {
+      throw new ChainError(ChainErrorKinds.InvalidArgument, (err as Error).message, { chainId: this.chainId });
+    }
   }
 
   private onOneProvider<T>(method: string, run: (provider: TonProvider) => Promise<T>): Promise<T> {
     const provider = this.provider;
     return provider instanceof TonFallbackProvider ? provider.onOneProvider(method, run) : run(provider);
-  }
-
-  private async chainTimeIsPast(provider: TonProvider, validUntil: number): Promise<boolean> {
-    return (await provider.getMasterchainHead()).utime > validUntil + REQUEST_EXPIRY_MARGIN_SECONDS;
   }
 
   /** TON addresses do not reveal their key, so a signature cannot be checked against one. */
@@ -333,11 +352,7 @@ export class TonChain extends Chain {
   }
 
   private async statusOf(hash: string, opts: TonGetTransactionStatusOpts): Promise<TonTransactionStatus> {
-    if (!/^[0-9a-f]{64}$/.test(hash)) {
-      throw new ChainError(ChainErrorKinds.InvalidArgument, `A TON transaction id is 64 lowercase hex characters, got ${hash}`, {
-        chainId: this.chainId,
-      });
-    }
+    this.assertTxHash(hash);
     const trace = await this.provider.getTrace(hash);
     const masterchainTip = trace === null ? 0 : (await this.provider.getMasterchainHead()).seqno;
     return TonTransactionStatus.fromTrace({

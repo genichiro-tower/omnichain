@@ -1,12 +1,20 @@
-import { Cell, loadMessage } from '@ton/core';
+import { Cell, type CommonMessageInfoExternalIn, type Message, loadMessage } from '@ton/core';
 
 import { ChainError, ChainErrorKinds } from '../errors.ts';
 import { NetworkType } from '../network_type.ts';
 import { AbstractSignedTransaction } from '../signed_transaction.ts';
-import type { JsonDict } from '../transaction_json.ts';
+import {
+  JSON_TRANSACTION_CHAIN_ID_KEY,
+  type JsonDict,
+  type JsonTransactionInput,
+  jsonPayloadItem,
+  jsonTransactionEnvelope,
+  parseJsonTransactionEnvelope,
+  registerJsonTransactionType,
+} from '../transaction_json.ts';
 import { UnsignedTransaction } from '../unsigned_transaction.ts';
 import { tonRawAddress } from './ton_address.ts';
-import { type TonOutMessage, tonNormalizedExternalHash, tonOutActions } from './ton_messages.ts';
+import { type TonOutMessage, tonNormalizedExternalHash, tonOutActions, tonW5RequestFields } from './ton_messages.ts';
 
 /**
  * A request a wallet will send itself: its messages, and optionally how long
@@ -27,19 +35,32 @@ export class TonUnsignedTransaction extends UnsignedTransaction {
   }
 }
 
-/** A signed external message: its BOC and its normalized hash, the transaction id. */
+/**
+ * A signed W5 external request: its BOC, its normalized hash (the
+ * transaction id), and — read from the signed body itself, so they survive a
+ * JSON round trip — the wallet, seqno and `validUntil` it commits to, which
+ * `TonChain.getRequestState` takes.
+ */
 export class TonSignedTransaction extends AbstractSignedTransaction {
   static readonly JSON_TYPE = 'TonSignedTransaction';
 
   readonly #chainId: number;
   readonly boc: string;
   readonly #hash: string;
+  /** Raw. */
+  readonly walletAddress: string;
+  readonly seqno: number;
+  readonly validUntil: number;
 
-  constructor(init: { chainId: number; boc: string; hash?: string }) {
+  constructor(init: { chainId: number; boc: string }) {
     super();
+    const request = tonExternalRequestOf(init.boc);
     this.#chainId = init.chainId;
     this.boc = init.boc;
-    this.#hash = init.hash ?? tonExternalBocHash(init.boc);
+    this.#hash = request.hash;
+    this.walletAddress = request.walletAddress;
+    this.seqno = request.seqno;
+    this.validUntil = request.validUntil;
   }
 
   get chainId(): number {
@@ -52,13 +73,41 @@ export class TonSignedTransaction extends AbstractSignedTransaction {
   }
 
   toJson(): JsonDict {
-    return { type: TonSignedTransaction.JSON_TYPE, chainId: this.#chainId, boc: this.boc };
+    return jsonTransactionEnvelope(TonSignedTransaction.JSON_TYPE, this.#chainId, { boc: this.boc });
   }
+
+  static fromJson(data: JsonTransactionInput): TonSignedTransaction {
+    const payload = parseJsonTransactionEnvelope(data, TonSignedTransaction.JSON_TYPE);
+    const chainId = jsonPayloadItem(payload, JSON_TRANSACTION_CHAIN_ID_KEY);
+    const boc = jsonPayloadItem(payload, 'boc');
+    if (!Number.isSafeInteger(chainId) || typeof boc !== 'string') {
+      throw new ChainError(ChainErrorKinds.InvalidArgument, 'A TonSignedTransaction payload needs an integer chain_id and a boc string');
+    }
+    return new TonSignedTransaction({ chainId: chainId as number, boc });
+  }
+}
+
+registerJsonTransactionType(TonSignedTransaction);
+
+/** A signed W5 external request read back from its base64 BOC. */
+export function tonExternalRequestOf(boc: string): { walletAddress: string; hash: string; seqno: number; validUntil: number } {
+  const message = externalMessageOf(boc);
+  const fields = tonW5RequestFields(message.body);
+  if (fields.authType !== 'external') {
+    throw new ChainError(ChainErrorKinds.TransactionDecodeFailed, 'Not a signed W5 external request: it is an internal one');
+  }
+  const walletAddress = message.info.dest.toRawString();
+  return { walletAddress, hash: tonNormalizedExternalHash(walletAddress, message.body), seqno: fields.seqno, validUntil: fields.validUntil };
 }
 
 /** The normalized hash of an external message given as a base64 BOC; refuses anything else. */
 export function tonExternalBocHash(boc: string): string {
-  let message;
+  const message = externalMessageOf(boc);
+  return tonNormalizedExternalHash(message.info.dest.toRawString(), message.body);
+}
+
+function externalMessageOf(boc: string): Message & { info: CommonMessageInfoExternalIn } {
+  let message: Message;
   try {
     message = loadMessage(Cell.fromBase64(boc).beginParse());
   } catch (err) {
@@ -67,6 +116,6 @@ export function tonExternalBocHash(boc: string): string {
   if (message.info.type !== 'external-in') {
     throw new ChainError(ChainErrorKinds.InvalidArgument, `Expected an external-in message, got ${message.info.type}`);
   }
-  return tonNormalizedExternalHash(message.info.dest.toRawString(), message.body);
+  return message as Message & { info: CommonMessageInfoExternalIn };
 }
 

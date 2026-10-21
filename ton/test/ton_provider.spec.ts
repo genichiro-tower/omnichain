@@ -218,7 +218,7 @@ describe('trace normalization', () => {
     const err = await new ToncenterProvider(ENDPOINT).getTrace(TRACE_HASH).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(TonProviderError);
     expect((err as TonProviderError).retryable).toBe(true);
-    expect((err as Error).message).toContain('inconsistent trace');
+    expect((err as Error).message).toMatch(/inconsistent trace/i);
 
     stubFetch((url) => {
       if (url.startsWith('https://toncenter.test')) return { status: 200, body: toncenter };
@@ -276,6 +276,62 @@ describe('trace normalization', () => {
     const trace = await new TonapiProvider(ENDPOINT).getTrace(TRACE_HASH);
     expect(trace?.complete).toBe(false);
     expect(trace?.transactions.map((tx) => tx.hash)).toEqual([TRACE_HASH]);
+  });
+
+  describe('never reads a provider gap as an undelivered message', () => {
+    const tonapiAnswers = (toncenterBody: unknown) =>
+      stubFetch((url) => {
+        if (url.startsWith('https://toncenter.test')) return { status: 200, body: toncenterBody };
+        if (url.includes('/v2/blockchain/blocks/')) return { status: 200, body: { master_ref: '(-1,8000000000000000,100472527)' } };
+        return { status: 200, body: fixture('tonapi_trace.json') };
+      });
+    const fallingBack = (): TonFallbackProvider =>
+      new TonFallbackProvider(new ToncenterProvider({ url: 'https://toncenter.test', apiKey: 'key' }), new TonapiProvider(ENDPOINT));
+
+    it('asks TonAPI when a finished TON Center trace dropped the node of a message that was sent', async () => {
+      const toncenter = fixture('toncenter_trace.json') as ToncenterTraceFixture;
+      toncenter.traces[0].trace.children = [];
+      stubFetch(() => ({ status: 200, body: toncenter }));
+      await expect(new ToncenterProvider(ENDPOINT).getTrace(TRACE_HASH)).rejects.toMatchObject({
+        retryable: true,
+        message: expect.stringContaining('reached no transaction'),
+      });
+      tonapiAnswers(toncenter);
+      const trace = await fallingBack().getTrace(TRACE_HASH);
+      expect(trace?.transactions).toHaveLength(2);
+    });
+
+    it('refuses a transaction below the root with no incoming message', async () => {
+      const toncenter = fixture('toncenter_trace.json') as ToncenterTraceFixture;
+      const child = toncenter.traces[0].transactions[toncenter.traces[0].trace.children[0].tx_hash] as { in_msg: unknown };
+      child.in_msg = null;
+      stubFetch(() => ({ status: 200, body: toncenter }));
+      await expect(new ToncenterProvider(ENDPOINT).getTrace(TRACE_HASH)).rejects.toMatchObject({
+        retryable: true,
+        message: expect.stringContaining('no incoming internal message'),
+      });
+    });
+
+    it('refuses an emulation the provider cut short', async () => {
+      stubFetch(() => ({ status: 200, body: { ...(fixture('toncenter_trace.json') as ToncenterTraceFixture).traces[0], is_incomplete: true } }));
+      await expect(new ToncenterProvider(ENDPOINT).emulate('boc')).rejects.toMatchObject({ retryable: true, message: expect.stringContaining('cut short') });
+    });
+
+    it('refuses a reply without a trace list, and reads only the explicit answers as no trace', async () => {
+      stubFetch(() => ({ status: 404, body: { error: 'not found' } }));
+      await expect(new ToncenterProvider(ENDPOINT).getTrace(TRACE_HASH)).rejects.toMatchObject({ retryable: true });
+      stubFetch(() => ({ status: 200, body: { address_book: {} } }));
+      await expect(new ToncenterProvider(ENDPOINT).getTrace(TRACE_HASH)).rejects.toMatchObject({ retryable: true });
+    });
+
+    it('refuses a malformed hash before asking either provider', async () => {
+      const calls = stubFetch(() => ({ status: 200, body: { traces: [] } }));
+      for (const provider of [new ToncenterProvider(ENDPOINT), new TonapiProvider(ENDPOINT)]) {
+        await expect(provider.getTrace(TRACE_HASH.toUpperCase())).rejects.toMatchObject({ kind: ChainErrorKinds.InvalidArgument });
+        await expect(provider.getTrace('../accounts/x')).rejects.toMatchObject({ kind: ChainErrorKinds.InvalidArgument });
+      }
+      expect(calls).not.toHaveBeenCalled();
+    });
   });
 
   it('reads an unseen message as no trace', async () => {

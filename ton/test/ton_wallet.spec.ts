@@ -1,12 +1,14 @@
 import { createHash } from 'node:crypto';
 
-import { Cell, loadMessage } from '@ton/core';
+import { Cell, beginCell, loadMessage } from '@ton/core';
 import { WalletContractV5R1 } from '@ton/ton';
 
 import { signVerify } from '@ton/crypto';
 
 import { TonWallet, deriveSlip10Ed25519Seed, tonMessageHash } from '../ton_wallet.ts';
-import { tonExternalBocHash } from '../ton_transactions.ts';
+import { CHAIN_ID_TON_MAINNET } from '../../chain_ids.ts';
+import { tonInternalRequestOf, tonW5RequestFields } from '../ton_messages.ts';
+import { TonSignedTransaction, tonExternalBocHash } from '../ton_transactions.ts';
 
 const MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 const W5_SIGNED_EXTERNAL_OP = 0x7369676e;
@@ -71,7 +73,27 @@ describe('TonWallet', () => {
 
   it('builds a signed internal request for a relayer', () => {
     const request = wallet.createInternalRequest({ seqno: 2, validUntil: 2_000_000_000, messages: [{ to: wallet.address, value: 5n }] });
-    expect(request.beginParse().loadUint(32)).toBe(W5_SIGNED_INTERNAL_OP);
+    expect(request.body.beginParse().loadUint(32)).toBe(W5_SIGNED_INTERNAL_OP);
+    expect(request).toMatchObject({ seqno: 2, validUntil: 2_000_000_000 });
+    // What it commits to can be read back from the signed body alone, e.g. one found in a trace.
+    expect(tonInternalRequestOf(request.body)).toEqual(request);
+    expect(tonW5RequestFields(request.body)).toMatchObject({ authType: 'internal', seqno: 2, validUntil: 2_000_000_000 });
+  });
+
+  it('keeps what a signed external request commits to, through JSON too', () => {
+    const request = wallet.createExternalRequest({ seqno: 7, validUntil: 2_000_000_123, messages: [{ to: wallet.address, value: 1n }] });
+    const signed = new TonSignedTransaction({ chainId: CHAIN_ID_TON_MAINNET, boc: request.boc });
+    expect(signed).toMatchObject({ walletAddress: wallet.address, seqno: 7, validUntil: 2_000_000_123, txHash: request.hash });
+    const restored = TonSignedTransaction.fromJson(JSON.stringify(signed.toJson()));
+    expect(restored).toMatchObject({ chainId: CHAIN_ID_TON_MAINNET, walletAddress: wallet.address, seqno: 7, validUntil: 2_000_000_123, txHash: request.hash });
+    expect(signed.toJson()).toEqual({ type: 'TonSignedTransaction', chain_id: CHAIN_ID_TON_MAINNET, boc: request.boc });
+  });
+
+  it('refuses to read an external request as an internal one, and anything that is not a W5 request', () => {
+    const external = wallet.createExternalRequest({ seqno: 1, messages: [{ to: wallet.address, value: 1n }] });
+    const externalBody = loadMessage(Cell.fromBase64(external.boc).beginParse()).body;
+    expect(() => tonInternalRequestOf(externalBody)).toThrow(/it is an external one/);
+    expect(() => tonW5RequestFields(beginCell().storeUint(0, 32).endCell())).toThrow(/Not a signed W5 request/);
   });
 
   it('refuses an empty request and one over 255 messages', () => {

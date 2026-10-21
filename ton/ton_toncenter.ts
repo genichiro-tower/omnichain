@@ -16,6 +16,7 @@ import {
   asBigInt,
   asRequiredInteger,
   asStatedAccountStatus,
+  assertTonTxHash,
   assertTraceConsistent,
   asRecord,
   definiteError,
@@ -92,8 +93,14 @@ export class ToncenterProvider implements TonProvider {
   }
 
   async getTrace(hash: string): Promise<TonTrace | null> {
-    const reply = asRecord(await this.get(`/api/v3/traces?msg_hash=${encodeURIComponent(hexToBase64(hash))}`), 'traces');
-    const traces = Array.isArray(reply.traces) ? reply.traces : [];
+    const reply = await tonHttpJson(NAME, this.endpoint, `/api/v3/traces?msg_hash=${encodeURIComponent(hexToBase64(assertTonTxHash(hash)))}`, {
+      headers: this.headers(),
+    });
+    // Only an explicit empty list means no trace; anything else says nothing.
+    if (reply === null || !Array.isArray((reply as Record<string, unknown>).traces)) {
+      throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} returned no trace list for ${hash}`, true);
+    }
+    const traces = (reply as Record<string, unknown[]>).traces;
     if (traces.length === 0) return null;
     const trace = asRecord(traces[0], 'trace');
     const info = asRecord(trace.trace_info ?? {}, 'trace_info');
@@ -117,7 +124,10 @@ export class ToncenterProvider implements TonProvider {
     if (error !== null) throw definiteError(ChainErrorKinds.SimulationFailed, `${NAME} emulation failed: ${error}`);
     const result = asRecord(reply, 'emulation');
     const { transactions, missing } = orderedTransactions(result.trace, asRecord(result.transactions, 'transactions'));
-    if (missing) throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} emulation returned a trace with missing transactions`, true);
+    // An emulation is judged whole or not at all; one cut short is asked of TonAPI.
+    if (missing || result.is_incomplete === true) {
+      throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} returned an emulation cut short`, true);
+    }
     return assertTraceConsistent(NAME, { complete: true, transactions });
   }
 

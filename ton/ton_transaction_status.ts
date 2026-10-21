@@ -12,7 +12,7 @@ import {
 } from '../transaction_status.ts';
 import { TonAsset } from './ton_asset.ts';
 import { TON_JETTON_INTERNAL_TRANSFER_OP, TON_JETTON_TRANSFER_OP, TON_W5_SIGNED_INTERNAL_OP } from './ton_messages.ts';
-import type { TonTrace, TonTraceMessage, TonTraceTransaction } from './ton_provider.ts';
+import { type TonTrace, type TonTraceMessage, type TonTraceTransaction, assertTraceConsistent } from './ton_provider.ts';
 
 /** Jettons a jetton wallet received in a trace (a TEP-74 `internal_transfer` it accepted). */
 export interface TonJettonCredit {
@@ -39,7 +39,11 @@ export type TonDeliveryOutcome =
    * left to pay for the bounce. The value stayed there or went on fees.
    */
   | 'failed'
-  /** The trace is complete but no transaction received it. */
+  /**
+   * A jetton transfer whose sender's jetton wallet took it without error but
+   * sent the jettons nowhere. Never a message missing from a complete trace:
+   * that is the provider's gap, refused as an inconsistent trace.
+   */
   | 'undelivered'
   /** The trace is still running. */
   | 'pending';
@@ -85,6 +89,7 @@ export interface TonTraceSummary {
 }
 
 export function summarizeTonTrace(chainId: number, trace: TonTrace): TonTraceSummary {
+  assertTraceConsistent('the trace given', trace);
   const native = new TonAsset(chainId, 'TON', null, TonAsset.NATIVE_DECIMALS);
   const deltas = new Map<string, bigint>();
   const add = (account: string, delta: bigint): void => {

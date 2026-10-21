@@ -375,28 +375,73 @@ export function tonTraceMessageOf(message: Message): TonTraceMessage {
 }
 
 /**
- * Every internal message sent must carry its source and `created_lt`, and every
- * transaction that received a message must have received one its parent sent:
- * same source, `created_lt`, destination and value. A provider whose
- * trace breaks that is wrong, not the chain, so the error is retryable and
- * the fallback provider is asked instead.
+ * Checks a trace before anything is judged from it. On TON every internal
+ * message produces a transaction where it lands, so a provider's trace must
+ * hold together:
+ * - one root (the first transaction); every other transaction has a parent in
+ *   the trace and an incoming message. A trace still running may lack a
+ *   parent, the root included;
+ * - every internal message sent names its source and `created_lt`;
+ * - every incoming message is one its parent sent: same source, `created_lt`,
+ *   destination and value;
+ * - in a complete trace, every internal message sent has the transaction
+ *   that received it.
+ * A trace that breaks any of these is the provider's error, not the chain's:
+ * the error is retryable, so the fallback provider is asked instead, and no
+ * gap is ever read as an undelivered message.
  */
-export function assertTraceConsistent(provider: string, trace: TonTrace): TonTrace {
-  const byHash = new Map(trace.transactions.map((tx) => [tx.hash, tx]));
+export function assertTraceConsistent(source: string, trace: TonTrace): TonTrace {
   const inconsistent = (detail: string): TonProviderError =>
-    new TonProviderError(ChainErrorKinds.RpcError, `${provider} returned an inconsistent trace: ${detail}`, true);
-  for (const tx of trace.transactions) {
+    new TonProviderError(ChainErrorKinds.RpcError, `Inconsistent trace from ${source}: ${detail}`, true);
+  const byHash = new Map(trace.transactions.map((tx) => [tx.hash, tx]));
+  const received = new Set<string>();
+  trace.transactions.forEach((tx, index) => {
     const unnamed = tx.outMsgs.find((m) => m.destination !== null && (m.source === null || m.createdLt === null));
     if (unnamed !== undefined) throw inconsistent(`transaction ${tx.hash} sent a message to ${unnamed.destination} with no source or created_lt`);
-    if (tx.parent === null) continue;
+    if (index === 0 && tx.parent === null) return;
+    if (tx.parent === null) throw inconsistent(`transaction ${tx.hash} has no parent but is not the root`);
+    if (tx.inMsg === null || tx.inMsg.source === null || tx.inMsg.createdLt === null) {
+      throw inconsistent(`transaction ${tx.hash} has no incoming internal message`);
+    }
     const parent = byHash.get(tx.parent);
-    if (parent === undefined || tx.inMsg === null) continue;
-    const sent = parent.outMsgs.find((m) => m.source === tx.inMsg?.source && m.createdLt === tx.inMsg?.createdLt);
-    if (sent === undefined || tx.inMsg.createdLt === null || sent.destination !== tx.account || sent.value !== tx.inMsg.value) {
+    if (parent === undefined) {
+      if (trace.complete) throw inconsistent(`transaction ${tx.hash} names a parent ${tx.parent} the trace does not hold`);
+      return;
+    }
+    const inMsg = tx.inMsg;
+    const sent = parent.outMsgs.find((m) => m.source === inMsg.source && m.createdLt === inMsg.createdLt);
+    if (sent === undefined || sent.destination !== tx.account || sent.value !== inMsg.value) {
       throw inconsistent(`transaction ${tx.hash} received no message its parent ${parent.hash} sent`);
+    }
+    received.add(`${parent.hash}:${inMsg.createdLt}`);
+  });
+  if (trace.complete) {
+    for (const tx of trace.transactions) {
+      const lost = tx.outMsgs.find((m) => m.destination !== null && !received.has(`${tx.hash}:${m.createdLt}`));
+      if (lost !== undefined) {
+        throw inconsistent(`the trace is complete, but the message ${tx.hash} sent to ${lost.destination} reached no transaction`);
+      }
     }
   }
   return trace;
+}
+
+const TX_HASH_REGEX = /^[0-9a-f]{64}$/;
+
+/**
+ * Refuses anything but a transaction id as the SDK gives it — the normalized
+ * external-message hash, 64 lowercase hex characters. A base64 hash or a typo
+ * would otherwise find no trace, and "no trace" counts as "never landed".
+ */
+export function assertTonTxHash(hash: string): string {
+  if (typeof hash !== 'string' || !TX_HASH_REGEX.test(hash)) {
+    throw new TonProviderError(
+      ChainErrorKinds.InvalidArgument,
+      `A TON transaction id is 64 lowercase hex characters, got ${JSON.stringify(hash)}`,
+      false,
+    );
+  }
+  return hash;
 }
 
 export function definiteError(kind: ChainErrorKind, message: string): TonProviderError {

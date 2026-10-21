@@ -55,12 +55,12 @@ describe('TON messages', () => {
   });
 
   it("makes a bounceable relay message that deploys its target only when asked", () => {
-    const request = tonCommentBody('request');
+    const request = { body: tonCommentBody('request'), seqno: 1, validUntil: 2_000_000_000 };
     const wallet = { address: OWNER, stateInit: { code: tonCommentBody('code'), data: tonCommentBody('data') } };
     expect(tonRelayMessage({ wallet, request, value: 50_000_000n, deploy: true })).toEqual({
       to: OWNER,
       value: 50_000_000n,
-      body: request,
+      body: request.body,
       bounce: true,
       stateInit: wallet.stateInit,
     });

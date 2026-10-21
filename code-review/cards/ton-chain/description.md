@@ -80,8 +80,8 @@ afterwards whether it did.
       the id is the same normalized hash on both. If TonAPI then refuses
       it, or there is no fallback, the broadcast is **uncertain**
       (`TonBroadcastUncertainError`, with the hash): the message may land,
-      so the caller reads its status or waits for `isRequestExpired`
-      before signing a replacement;
+      so the caller waits for `getRequestState` to say `expired` before
+      signing a replacement (`consumed`: it landed);
     - a broadcast reply is read by the lite server's text, not its HTTP
       status (TON Center sends both as 500): "cannot apply external
       message" on W5's seqno check (exit code 133, the first check after the
@@ -288,13 +288,15 @@ afterwards whether it did.
     `bounced`, value back to the fee payer;
   - the run spent 0.0029 TON; the replies are recorded and replayed under
     `npm test`.
-- The live suite (13 tests) also checks both providers against each other:
-  the masterchain head, emulation and the sent trace alike, `isRequestExpired`
-  on a request never sent and on one that landed, and a resend of a landed
-  message (`NonceTooLow` from both, never landing twice), and a relayed
-  request that failed then executed when delivered again. Last run
-  2026-10-21: 14 passed, 0.0055 TON.
-- 1850 tests pass (92 for TON).
+- The live suite (14 tests) also checks both providers against each other:
+  the masterchain head, emulation and the sent trace alike (both passing the
+  trace check), `getRequestState` on a request never sent (`expired` /
+  `live`) and on one that landed (`consumed`), a resend of a landed message
+  (`NonceTooLow` from both, never landing twice), and a relayed request that
+  failed (`live`, seqno unchanged) then executed when delivered again
+  (`consumed`, its seqno and `validUntil` read back from the trace). Last
+  run 2026-10-21: 14 passed, 0.0055 TON.
+- 1865 tests pass (107 for TON).
 
 <!-- ====================== PART C - DEVIATIONS ====================== -->
 
@@ -311,21 +313,26 @@ PR: `getomnichain/omnichain#17` (`genichiro-tower:feature/ton-chain` →
   first hop of each message they sent (a jetton transfer at the receiver's
   jetton wallet), with `summary.deliveries` per message; failures further
   down do not fail it. Codes: `skipped_actions`, `request_not_executed`,
-  `bounced`, `receiver_failed`, `undelivered`, `jetton_bounced`,
-  `jetton_receiver_failed`, `jetton_undelivered`. A message is `bounced`
+  `bounced`, `receiver_failed`, `jetton_bounced`, `jetton_receiver_failed`,
+  `jetton_undelivered` (a jetton wallet that sent the jettons nowhere). A
+  message missing from a complete trace is never `undelivered`: it is the
+  provider's gap (see matching). A message is `bounced`
   only when the receiver's transaction sent it back (a failed compute phase,
   or a failed action with send mode +16, with value left for the bounce); a
   receiver that aborted without sending it back makes it `failed` — the value
   did not return.
 - **R8, matching:** each message a sending wallet sent is matched to the
   transaction that received it by (source, `created_lt`), which names one
-  message. Each provider checks a trace before returning it: every internal
-  message names its source and `created_lt`, and every transaction received
-  a message its parent sent, to that account, with that value. A trace that
-  breaks this fails retryably, so it is read from TonAPI instead. A running
-  TON Center trace without a transaction yet is incomplete, and that
-  transaction stays its children's parent; a finished one that leaves a
-  transaction out is read from TonAPI. Matching by destination and value paired
+  message. `assertTraceConsistent` checks every trace, in both providers and
+  again in the judgment: every transaction but the root has a parent in the
+  trace and an incoming internal message its parent sent (same source,
+  `created_lt`, destination, value); every internal message names its source
+  and `created_lt`; in a complete trace every message sent has its receiving
+  transaction. A trace that breaks this fails retryably and is read from
+  TonAPI; so does an emulation cut short. A running trace may lack
+  transactions (TON Center keeps a missing one as its children's parent) and
+  is incomplete. Transaction ids are refused unless 64 lowercase hex, and
+  "no trace" is read only from the providers' explicit answers. Matching by destination and value paired
   identical messages arbitrarily (a vault's jetton transfers all go to its
   own jetton wallet with the same attached TON). `summary.deliveries` is
   ordered as each wallet sent its messages, the request's order.
@@ -341,7 +348,8 @@ PR: `getomnichain/omnichain#17` (`genichiro-tower:feature/ton-chain` →
     `jest.live.config.mjs`, never part of `npm test`) runs AC3 and AC4 on
     mainnet, plus the provider behaviour the SDK relies on: the masterchain
     head's time, emulation and sent traces alike on both providers,
-    `isRequestExpired`, and a resend of a landed message (refused, accepted
+    `getRequestState`, a failed relayed request delivered again, and a
+    resend of a landed message (refused, accepted
     or "duplicate", never landing twice; TonAPI serves its emulation of a
     message in flight as its trace, which is read as no trace). It reads,
     and emulates by default; `TON_LIVE_SEND=1` broadcasts
@@ -354,18 +362,28 @@ PR: `getomnichain/omnichain#17` (`genichiro-tower:feature/ton-chain` →
     headers.
   - AC6 (a refunded jetton transfer) is covered by hand-built traces only;
     recording one needs jettons on the fee payer.
-- **R8, expiry:** `isRequestExpired({ wallet, seqno, validUntil, hash })`
-  uses the chain's clock (the masterchain head's time, 60 s margin), the
-  wallet's seqno and the absence of a trace, never the local clock, all read
-  from one provider (all repeated on TonAPI if one fails on TON Center). A
-  failed or malformed read throws; no provider reads a failure as a 0 seqno,
-  a `NaN` time or `nonexist`. The seqno is read live from the wallet's
-  get-method, not gated on the indexed account state, which trails a deploy.
-- **R8, relayed requests:** W5 keeps an internal request's seqno only when
-  the transaction succeeds, so a relayed request that failed stays valid and
-  anyone can deliver it again until `validUntil` (seen on mainnet).
-  `isRelayedRequestExpired({ wallet, seqno, validUntil })` says when it is
-  dead; a `Failed` status does not.
+- **R8, replacing a request:** one check,
+  `getRequestState({ wallet, seqno, validUntil, hash? })` →
+  `live | expired | consumed`, for external and relayed requests alike.
+  `consumed`: the wallet's seqno moved past it or it has a trace — never
+  re-sign, read the status. `expired`: the chain's clock (masterchain head
+  time, 60 s margin) is past `validUntil`, the seqno not past it, no trace —
+  safe to replace. `live`: it can still execute. W5 keeps an internal
+  request's seqno only when the transaction succeeds, so a relayed request
+  that failed stays `live` and anyone can deliver it again until
+  `validUntil` (seen on mainnet); a `Failed` status does not end it. A
+  `hash` whose trace starts at another wallet (a relay's hash given for the
+  relayed wallet) is refused. All
+  reads come from one provider; a failed or malformed read throws (no 0
+  seqno, `NaN` time, `nonexist` or "no trace" from a failure). The seqno is
+  read live from the wallet's get-method, not gated on the indexed account
+  state, which trails a deploy.
+- **R4/R5, what a request commits to:** `createInternalRequest` returns
+  `{ body, seqno, validUntil }`, and `tonRelayMessage` takes that;
+  `TonSignedTransaction` reads `walletAddress`, `seqno` and `validUntil` from
+  its signed body and round-trips through JSON (registered type).
+  `tonW5RequestFields` / `tonInternalRequestOf` read them from any signed W5
+  body, so `getRequestState` can always be called after the fact.
 - The root entry exports only `TonAddress`; the family is `./ton`.
 
 ---

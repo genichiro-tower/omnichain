@@ -13,7 +13,7 @@ import { UnsignedTransaction } from '../unsigned_transaction.ts';
 import { AbstractBip32StyleSingleAccountWallet, AbstractSignedMessage } from '../wallet.base.ts';
 import { TonAddress, type TonUserFriendlyOptions } from './ton_address.ts';
 import { TonChain } from './ton_chain.ts';
-import { type TonOutMessage, tonNormalizedExternalHash, tonOutActions } from './ton_messages.ts';
+import { type TonInternalRequest, type TonOutMessage, tonNormalizedExternalHash, tonOutActions } from './ton_messages.ts';
 import { TonSignedTransaction, TonUnsignedTransaction } from './ton_transactions.ts';
 
 const TON_COIN_TYPE = 607;
@@ -182,14 +182,16 @@ export class TonWallet extends AbstractBip32StyleSingleAccountWallet {
    * `tonRelayMessage`. Send modes are kept as given, so without "ignore errors"
    * the request's messages leave all together or not at all.
    */
-  createInternalRequest(args: TonRequestArgs): Cell {
-    return this.contract.createRequest({
+  createInternalRequest(args: TonRequestArgs): TonInternalRequest {
+    const validUntil = args.validUntil ?? defaultValidUntil();
+    const body = this.contract.createRequest({
       seqno: args.seqno,
-      timeout: args.validUntil ?? defaultValidUntil(),
+      timeout: validUntil,
       secretKey: this.#secretKey,
       authType: 'internal',
       actions: tonOutActions(args.messages),
     });
+    return { body, seqno: args.seqno, validUntil };
   }
 
   /** Signs `transaction` as an external request, reading the seqno and deployment from `chain`. */
@@ -214,7 +216,7 @@ export class TonWallet extends AbstractBip32StyleSingleAccountWallet {
     // At seqno 0 the wallet may have no code yet; a StateInit sent to a
     // deployed wallet is ignored.
     const request = this.createExternalRequest({ seqno, messages: transaction.messages, validUntil: transaction.validUntil, deploy: seqno === 0 });
-    return new TonSignedTransaction({ chainId: transaction.chainId, boc: request.boc, hash: request.hash });
+    return new TonSignedTransaction({ chainId: transaction.chainId, boc: request.boc });
   }
 
   /** An ed25519 signature over {@link tonMessageHash}, hex; never over the message's bytes, which could pass for a request hash. */

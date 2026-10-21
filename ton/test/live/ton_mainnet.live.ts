@@ -8,7 +8,8 @@ import { ChainErrorKinds } from '../../../errors.ts';
 import { TransactionStatusTypes } from '../../../transaction_status.ts';
 import { TON_CENTER_MAINNET_URL, TONAPI_MAINNET_URL, TonMainnet } from '../../ton_chains.ts';
 import type { TonEmulationResult } from '../../ton_chain.ts';
-import { tonRelayMessage } from '../../ton_messages.ts';
+import { tonInternalRequestOf, tonRelayMessage } from '../../ton_messages.ts';
+import { TonSignedTransaction } from '../../ton_transactions.ts';
 import type { TonProvider, TonTrace, TonTraceTransaction } from '../../ton_provider.ts';
 import { ToncenterProvider } from '../../ton_toncenter.ts';
 import { TonapiProvider } from '../../ton_tonapi.ts';
@@ -213,13 +214,16 @@ describe('TON mainnet (live)', () => {
     expect(fromTonapi.transactions.map((tx) => tx.account)).toEqual(fromToncenter.transactions.map((tx) => tx.account));
   });
 
-  it('calls a request that was never sent expired once the chain is past its validUntil', async () => {
+  it('calls a request that was never sent expired once the chain is past its validUntil, and live before', async () => {
     const head = await toncenter.getMasterchainHead();
     const { wallet: vault } = await freshVault(env.feePayerAccount);
     const stale = await relayBoc(vault, true, head.utime - 120);
-    await expect(chain.isRequestExpired({ wallet: feePayer.address, ...stale })).resolves.toBe(true);
+    await expect(chain.getRequestState({ wallet: feePayer.address, ...stale })).resolves.toBe('expired');
     const fresh = await relayBoc(vault, true);
-    await expect(chain.isRequestExpired({ wallet: feePayer.address, ...fresh })).resolves.toBe(false);
+    await expect(chain.getRequestState({ wallet: feePayer.address, ...fresh })).resolves.toBe('live');
+    // A signed transaction carries what the check needs, read from the signed body.
+    const signed = new TonSignedTransaction({ chainId: chain.chainId, boc: fresh.boc });
+    expect(signed).toMatchObject({ walletAddress: feePayer.address, seqno: fresh.seqno, validUntil: fresh.validUntil, txHash: fresh.hash });
   });
 
   it('emulates a relay that deploys a fresh vault (AC3)', async () => {
@@ -265,9 +269,9 @@ describe('TON mainnet (live)', () => {
     expect(comparable(fromTonapi)).toEqual(comparable(fromToncenter));
   });
 
-  (env.send ? it : it.skip)('never calls a request that landed expired', async () => {
+  (env.send ? it : it.skip)('calls a request that landed consumed', async () => {
     if (sent === null) throw new Error('the deploy relay was not sent');
-    await expect(chain.isRequestExpired({ wallet: feePayer.address, ...sent })).resolves.toBe(false);
+    await expect(chain.getRequestState({ wallet: feePayer.address, ...sent })).resolves.toBe('consumed');
   });
 
   // A provider answers a resend of a landed message with W5's seqno refusal
@@ -326,12 +330,16 @@ describe('TON mainnet (live)', () => {
     // The relay is bounceable, but an action-phase failure without +16 sends nothing back.
     expect(failed.summary?.deliveries[0].outcome).toBe('failed');
     expect(await chain.getSeqno(vault.address)).toBe(seqno);
-    await expect(chain.isRelayedRequestExpired({ wallet: vault.address, seqno, validUntil })).resolves.toBe(false);
+    // Failed, yet still live: anyone can deliver it again.
+    await expect(chain.getRequestState({ wallet: vault.address, seqno, validUntil })).resolves.toBe('live');
 
     const replayed = await deliver('relayed_request_replayed', 'the same signed request delivered again, now payable');
     expect(replayed.status).toBe(TransactionStatusTypes.Success);
     expect(await chain.getSeqno(vault.address)).toBe(seqno + 1);
-    await expect(chain.isRelayedRequestExpired({ wallet: vault.address, seqno, validUntil })).resolves.toBe(false);
+    await expect(chain.getRequestState({ wallet: vault.address, seqno, validUntil })).resolves.toBe('consumed');
+    // What the relayed request committed to can be read back from the trace's relay message.
+    const relayed = replayed.trace?.transactions.find((tx) => tx.account === vault.address)?.inMsg?.body;
+    expect(relayed === undefined || relayed === null ? null : tonInternalRequestOf(relayed)).toMatchObject({ seqno, validUntil });
   });
 
   (env.send ? it : it.skip)('sends a relay without deploy and reads it Failed', async () => {

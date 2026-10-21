@@ -15,6 +15,7 @@ import {
   asRecord,
   asRequiredInteger,
   asStatedAccountStatus,
+  assertTonTxHash,
   assertTraceConsistent,
   definiteError,
   errorMessageOf,
@@ -85,7 +86,8 @@ export class TonapiProvider implements TonProvider {
   }
 
   async getTrace(hash: string): Promise<TonTrace | null> {
-    const reply = await this.get(`/v2/traces/${hash}`);
+    // TonAPI answers a hash it has no trace for with 404.
+    const reply = await this.get(`/v2/traces/${encodeURIComponent(assertTonTxHash(hash))}`);
     if (reply === null) return null;
     // TonAPI answers a message still in flight with its emulation; only what
     // is on chain counts, and a predicted hop leaves the trace incomplete.
@@ -104,6 +106,8 @@ export class TonapiProvider implements TonProvider {
     const error = errorMessageOf(reply);
     if (error !== null) throw definiteError(ChainErrorKinds.SimulationFailed, `${NAME} emulation failed: ${error}`);
     const root = reply as TonapiTraceNode;
+    // An emulation is judged whole or not at all.
+    if (!isComplete(root)) throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} returned an emulation cut short`, true);
     return assertTraceConsistent(NAME, { complete: true, transactions: flatten(root).map(({ tx, parent }) => toTransaction(tx, parent, null)) });
   }
 

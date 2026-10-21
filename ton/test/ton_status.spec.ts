@@ -6,7 +6,7 @@ import { TON_JETTON_INTERNAL_TRANSFER_OP, TON_JETTON_TRANSFER_OP, TON_W5_SIGNED_
 import { type TonTrace, type TonTraceMessage, type TonTraceTransaction, assertTraceConsistent } from '../ton_provider.ts';
 import { TonTransactionStatus, summarizeTonTrace } from '../ton_transaction_status.ts';
 import { TonWallet } from '../ton_wallet.ts';
-import { JETTON_WALLET, MNEMONIC, OTHER, bouncing, realTrace } from './ton_test_helpers.ts';
+import { JETTON_WALLET, MNEMONIC, OTHER, bouncing, realTrace, settled } from './ton_test_helpers.ts';
 
 describe('TonTransactionStatus', () => {
   it('is Success once the trace is complete and every transaction is in a referenced block', async () => {
@@ -43,7 +43,7 @@ describe('TonTransactionStatus', () => {
       chainId: CHAIN_ID_TON_MAINNET,
       trace: {
         complete: true,
-        transactions: [{ ...root, outMsgs: [{ ...root.outMsgs[0], bounce: true }] }, bouncing({ ...child, inMsg: { ...(child.inMsg as TonTraceMessage), bounce: true } })],
+        transactions: settled([{ ...root, outMsgs: [{ ...root.outMsgs[0], bounce: true }] }, bouncing({ ...child, inMsg: { ...(child.inMsg as TonTraceMessage), bounce: true } })]),
       },
       masterchainTip: 100472540,
     });
@@ -77,7 +77,7 @@ describe('TonTransactionStatus', () => {
     const downstream: TonTraceTransaction = { ...child, hash: 'dd'.repeat(32), parent: child.hash, success: false };
     const status = TonTransactionStatus.fromTrace({
       chainId: CHAIN_ID_TON_MAINNET,
-      trace: { complete: true, transactions: [root, { ...child, success: false }, downstream] },
+      trace: { complete: true, transactions: settled([root, { ...child, success: false }, downstream]) },
       masterchainTip: 100472540,
     });
     expect(status.status).toBe(TransactionStatusTypes.Success);
@@ -122,14 +122,16 @@ describe('TonTransactionStatus', () => {
     const judge = (receiver: TonTraceTransaction | null, complete = true): TonTransactionStatus =>
       TonTransactionStatus.fromTrace({
         chainId: CHAIN_ID_TON_MAINNET,
-        trace: { complete, transactions: receiver === null ? [root, target] : [root, target, receiver] },
+        trace: { complete, transactions: receiver === null ? [root, target] : settled([root, target, receiver]) },
         masterchainTip: 100472540,
       });
     expect(judge(received).status).toBe(TransactionStatusTypes.Success);
     expect(judge(received).summary?.deliveries.map((d) => d.outcome)).toEqual(['delivered', 'delivered']);
     expect(judge(bouncing(received)).error?.code).toBe('bounced');
     expect(judge({ ...received, success: false, aborted: true }).error?.code).toBe('receiver_failed');
-    expect(judge(null).error?.code).toBe('undelivered');
+    // A complete trace without the payout's receiver is the provider's gap, not an undelivered payout.
+    expect(() => judge(null)).toThrow(expect.objectContaining({ retryable: true, message: expect.stringContaining('reached no transaction') }));
+    expect(judge(null, false).status).toBe(TransactionStatusTypes.Pending);
   });
 
   it('is Failed when a bounceable message reaches an address with no code', async () => {
@@ -139,10 +141,10 @@ describe('TonTransactionStatus', () => {
       chainId: CHAIN_ID_TON_MAINNET,
       trace: {
         complete: true,
-        transactions: [
+        transactions: settled([
           { ...root, outMsgs: [{ ...root.outMsgs[0], bounce: true }] },
           { ...bouncing({ ...child, inMsg: { ...(child.inMsg as TonTraceMessage), bounce: true } }), success: true, origStatus: 'nonexist' as const },
-        ],
+        ]),
       },
       masterchainTip: 100472540,
     });
@@ -164,7 +166,7 @@ describe('TonTransactionStatus', () => {
     };
     const status = TonTransactionStatus.fromTrace({
       chainId: CHAIN_ID_TON_MAINNET,
-      trace: { complete: true, transactions: [{ ...root, outMsgs: [relay] }, target] },
+      trace: { complete: true, transactions: settled([{ ...root, outMsgs: [relay] }, target]) },
       masterchainTip: 100472540,
     });
     expect(status.status).toBe(TransactionStatusTypes.Failed);
@@ -189,12 +191,12 @@ describe('TonTransactionStatus', () => {
     const judge = (receiver: TonTraceTransaction): TonTransactionStatus =>
       TonTransactionStatus.fromTrace({
         chainId: CHAIN_ID_TON_MAINNET,
-        trace: { complete: true, transactions: [{ ...root, outMsgs: [transfer] }, senderJettonWallet, receiver] },
+        trace: { complete: true, transactions: settled([{ ...root, outMsgs: [transfer] }, senderJettonWallet, receiver]) },
         masterchainTip: 100472540,
       });
-    const settled = judge(receiverJettonWallet);
-    expect(settled.status).toBe(TransactionStatusTypes.Success);
-    expect(settled.summary?.deliveries[0]).toMatchObject({ outcome: 'delivered', transaction: receiverJettonWallet.hash });
+    const landed = judge(receiverJettonWallet);
+    expect(landed.status).toBe(TransactionStatusTypes.Success);
+    expect(landed.summary?.deliveries[0]).toMatchObject({ outcome: 'delivered', transaction: receiverJettonWallet.hash });
     const refunded = judge(bouncing(receiverJettonWallet));
     expect(refunded.status).toBe(TransactionStatusTypes.Failed);
     expect(refunded.error?.code).toBe('jetton_bounced');
@@ -248,7 +250,7 @@ describe('TonTransactionStatus', () => {
       // The receivers are listed in the opposite order to the messages, as a provider may return them.
       trace: {
         complete: true,
-        transactions: [{ ...root, outMsgs: [transfer(20n), transfer(10n)] }, second, first, secondRefunded, firstLanded],
+        transactions: settled([{ ...root, outMsgs: [transfer(20n), transfer(10n)] }, second, first, secondRefunded, firstLanded]),
       },
       masterchainTip: 100472540,
     });
@@ -279,7 +281,7 @@ describe('TonTransactionStatus', () => {
       [{ ...root, outMsgs: [{ ...root.outMsgs[0], createdLt: null }] }, child],
     ];
     for (const transactions of tampered) {
-      expect(refused(transactions)).toMatchObject({ retryable: true, message: expect.stringContaining('inconsistent trace') });
+      expect(refused(transactions)).toMatchObject({ retryable: true, message: expect.stringMatching(/inconsistent trace/i) });
     }
   });
 
@@ -308,7 +310,7 @@ describe('TonTransactionStatus', () => {
       ...child,
       inMsg: { ...(child.inMsg as NonNullable<TonTraceTransaction['inMsg']>), opcode: TON_JETTON_INTERNAL_TRANSFER_OP, body },
     };
-    expect(summarizeTonTrace(CHAIN_ID_TON_MAINNET, { complete: true, transactions: [credit] }).jettonCredits).toEqual([
+    expect(summarizeTonTrace(CHAIN_ID_TON_MAINNET, { complete: true, transactions: [{ ...credit, parent: null }] }).jettonCredits).toEqual([
       { jettonWallet: child.account, amount: 9_000n, from: TonWallet.fromMnemonic(MNEMONIC).address },
     ]);
   });

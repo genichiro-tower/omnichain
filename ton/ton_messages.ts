@@ -96,6 +96,60 @@ export function tonJettonTransferBody(args: TonJettonTransferBodyArgs): Cell {
 }
 
 export const TON_W5_SIGNED_INTERNAL_OP = 0x73696e74;
+export const TON_W5_SIGNED_EXTERNAL_OP = 0x7369676e;
+
+/** What a signed W5 request commits to, read back from its body. */
+export interface TonW5RequestFields {
+  /** `external`: the wallet sends it itself; `internal`: a relayer delivers it. */
+  authType: 'external' | 'internal';
+  walletId: number;
+  /** Unix seconds; the wallet refuses it from then on. */
+  validUntil: number;
+  /** The wallet seqno it executes at. */
+  seqno: number;
+}
+
+/**
+ * The fields of a signed W5R1 request body: op, wallet id, `valid_until` and
+ * seqno lead the body, the signature trails it. Throws `TransactionDecodeFailed`
+ * for anything that is not one.
+ */
+export function tonW5RequestFields(body: Cell): TonW5RequestFields {
+  try {
+    const slice = body.beginParse();
+    const op = slice.loadUint(32);
+    if (op !== TON_W5_SIGNED_EXTERNAL_OP && op !== TON_W5_SIGNED_INTERNAL_OP) throw new Error(`op 0x${op.toString(16)}`);
+    return {
+      authType: op === TON_W5_SIGNED_EXTERNAL_OP ? 'external' : 'internal',
+      walletId: slice.loadInt(32),
+      validUntil: slice.loadUint(32),
+      seqno: slice.loadUint(32),
+    };
+  } catch (err) {
+    throw new ChainError(ChainErrorKinds.TransactionDecodeFailed, `Not a signed W5 request: ${(err as Error).message}`, undefined, err as Error);
+  }
+}
+
+/**
+ * A request a wallet signed for a relayer (`TonWallet.createInternalRequest`),
+ * with the seqno and `validUntil` it commits to — what
+ * `TonChain.getRequestState` needs once it has been sent.
+ */
+export interface TonInternalRequest {
+  /** The signed request, the relay message's body. */
+  body: Cell;
+  seqno: number;
+  validUntil: number;
+}
+
+/** A signed internal request read back from its body, e.g. one found in a trace. */
+export function tonInternalRequestOf(body: Cell): TonInternalRequest {
+  const fields = tonW5RequestFields(body);
+  if (fields.authType !== 'internal') {
+    throw new ChainError(ChainErrorKinds.TransactionDecodeFailed, 'Not a signed W5 internal request: it is an external one');
+  }
+  return { body, seqno: fields.seqno, validUntil: fields.validUntil };
+}
 
 /** The wallet a relay delivers to: its address and the StateInit that deploys it (a `TonWallet` fits). */
 export interface TonRelayTarget {
@@ -106,7 +160,7 @@ export interface TonRelayTarget {
 export interface TonRelayMessageArgs {
   wallet: TonRelayTarget;
   /** The wallet's own signed internal request (`TonWallet.createInternalRequest`). */
-  request: Cell;
+  request: TonInternalRequest;
   /** Nanotons the relayer attaches: the trace's fees plus whatever the request's messages need. */
   value: bigint;
   /** Attach the wallet's StateInit, deploying it; set while it is not deployed. */
@@ -125,7 +179,7 @@ export function tonRelayMessage(args: TonRelayMessageArgs): TonOutMessage {
   return {
     to: args.wallet.address,
     value: args.value,
-    body: args.request,
+    body: args.request.body,
     bounce: true,
     stateInit: args.deploy ? args.wallet.stateInit : undefined,
   };

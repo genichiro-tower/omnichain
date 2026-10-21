@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 import type { TonTrace, TonTraceMessage, TonTraceTransaction } from '../ton_provider.ts';
@@ -14,7 +15,7 @@ export async function realTrace(): Promise<TonTrace> {
   const realFetch = globalThis.fetch;
   globalThis.fetch = (async () => new Response(JSON.stringify(body), { status: 200 })) as typeof fetch;
   try {
-    return (await new ToncenterProvider({ url: 'https://x', apiKey: 'k' }).getTrace('00')) as TonTrace;
+    return (await new ToncenterProvider({ url: 'https://x', apiKey: 'k' }).getTrace('50379a6ae50911e7e3b658ae96044411097992b6f9ca63c82c6b6c9f2de88d66')) as TonTrace;
   } finally {
     globalThis.fetch = realFetch;
   }
@@ -32,4 +33,50 @@ export function bouncing(receiver: TonTraceTransaction): TonTraceTransaction {
     createdLt: (inMsg.createdLt ?? 0n) + 1n,
   };
   return { ...receiver, success: false, aborted: true, outMsgs: [...receiver.outMsgs, bounce] };
+}
+
+/**
+ * A hand-built trace made whole the way the chain would have it: each
+ * transaction's incoming message is one its parent sent (added to the
+ * parent's messages if the test left it out), and every message sent has the
+ * transaction that received it (a plain, successful one if the test left it
+ * out). Providers refuse a trace with gaps, and so does the judgment.
+ */
+export function settled(transactions: readonly TonTraceTransaction[]): TonTraceTransaction[] {
+  const txs = transactions.map((tx) => ({ ...tx, outMsgs: [...tx.outMsgs] }));
+  const byHash = new Map(txs.map((tx) => [tx.hash, tx]));
+  let lt = 900_000_000_000n;
+  for (const tx of txs.slice(1)) {
+    const parent = tx.parent === null ? undefined : byHash.get(tx.parent);
+    const inMsg = tx.inMsg;
+    if (parent === undefined || inMsg === null) continue;
+    const sent = parent.outMsgs.find(
+      (m) => m.source === inMsg.source && m.createdLt === inMsg.createdLt && m.destination === tx.account && m.value === inMsg.value,
+    );
+    if (sent !== undefined) continue;
+    const message: TonTraceMessage = { ...inMsg, source: parent.account, destination: tx.account, createdLt: lt++ };
+    tx.inMsg = message;
+    parent.outMsgs.push(message);
+  }
+  const received = new Set(txs.flatMap((tx) => (tx.parent !== null && tx.inMsg !== null ? [`${tx.parent}:${tx.inMsg.createdLt}`] : [])));
+  const receivers = txs.flatMap((tx) =>
+    tx.outMsgs
+      .filter((m) => m.destination !== null && !received.has(`${tx.hash}:${m.createdLt}`))
+      .map(
+        (m): TonTraceTransaction => ({
+          ...tx,
+          hash: createHash('sha256').update(`${tx.hash}:${m.createdLt}`).digest('hex'),
+          parent: tx.hash,
+          account: m.destination as string,
+          success: true,
+          skippedActions: 0,
+          aborted: false,
+          computeExitCode: 0,
+          actionResultCode: 0,
+          inMsg: m,
+          outMsgs: [],
+        }),
+      ),
+  );
+  return [...txs, ...receivers];
 }
