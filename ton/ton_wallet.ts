@@ -197,14 +197,10 @@ export class TonWallet extends AbstractBip32StyleSingleAccountWallet {
         `Transaction for chain ${transaction.chainId} cannot be signed on ${tonChain.chainId}`,
       );
     }
-    const state = await tonChain.getAccountState(this._address);
-    const seqno = state.status === 'active' ? await tonChain.getSeqno(this._address) : 0;
-    const request = this.createExternalRequest({
-      seqno,
-      messages: transaction.messages,
-      validUntil: transaction.validUntil,
-      deploy: state.status !== 'active',
-    });
+    const seqno = await tonChain.getSeqno(this._address);
+    // At seqno 0 the wallet may have no code yet; a StateInit sent to a
+    // deployed wallet is ignored.
+    const request = this.createExternalRequest({ seqno, messages: transaction.messages, validUntil: transaction.validUntil, deploy: seqno === 0 });
     return new TonSignedTransaction({ chainId: transaction.chainId, boc: request.boc, hash: request.hash });
   }
 

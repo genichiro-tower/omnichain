@@ -329,13 +329,43 @@ describe('reads a failure as a failure, never as 0', () => {
     await expect(new TonapiProvider(ENDPOINT).getMasterchainHead()).rejects.toMatchObject({ retryable: true });
   });
 
-  it("refuses a deployed wallet's seqno it could not read", async () => {
-    stubFetch(() => ({ status: 200, body: { gas_used: 0, exit_code: -13, stack: [] } }));
+  it('reads seqno 0 only on the explicit answer that the account has no code', async () => {
+    // TON Center's reply for a never-used address, as observed on mainnet.
+    stubFetch(() => ({ status: 200, body: { gas_used: 0, exit_code: -13, stack: [{ type: 'num', value: '0x14c97' }] } }));
+    await expect(new ToncenterProvider(ENDPOINT).getSeqno('0:' + 'ab'.repeat(32))).resolves.toBe(0);
+    stubFetch(() => ({ status: 200, body: { seqno: 0 } }));
+    await expect(new TonapiProvider(ENDPOINT).getSeqno('0:' + 'ab'.repeat(32))).resolves.toBe(0);
+  });
+
+  it("refuses a wallet's seqno it could not read", async () => {
+    stubFetch(() => ({ status: 200, body: { gas_used: 0, exit_code: 11, stack: [] } }));
+    await expect(new ToncenterProvider(ENDPOINT).getSeqno('0:' + 'ab'.repeat(32))).rejects.toMatchObject({ retryable: true });
+    stubFetch(() => ({ status: 200, body: { error: 'cannot run get method', exit_code: 0 } }));
     await expect(new ToncenterProvider(ENDPOINT).getSeqno('0:' + 'ab'.repeat(32))).rejects.toMatchObject({ retryable: true });
     stubFetch(() => ({ status: 404, body: { error: 'entity not found' } }));
     await expect(new TonapiProvider(ENDPOINT).getSeqno('0:' + 'ab'.repeat(32))).rejects.toMatchObject({ retryable: true });
     stubFetch(() => ({ status: 200, body: {} }));
     await expect(new TonapiProvider(ENDPOINT).getSeqno('0:' + 'ab'.repeat(32))).rejects.toMatchObject({ retryable: true });
+  });
+});
+
+describe('account state: nonexist only when the provider says so', () => {
+  const ADDRESS = '0:' + 'ab'.repeat(32);
+
+  it('reads TonAPI stating nonexist as nonexist', async () => {
+    stubFetch(() => ({ status: 200, body: { address: ADDRESS, balance: 0, status: 'nonexist' } }));
+    await expect(new TonapiProvider(ENDPOINT).getAccountState(ADDRESS)).resolves.toMatchObject({ status: 'nonexist', balance: 0n });
+  });
+
+  it.each([
+    ['TON Center 404', () => new ToncenterProvider(ENDPOINT), { status: 404, body: { error: 'not found' } }],
+    ['TON Center without an account list', () => new ToncenterProvider(ENDPOINT), { status: 200, body: { address_book: {} } }],
+    ['TON Center with an unknown status', () => new ToncenterProvider(ENDPOINT), { status: 200, body: { accounts: [{ balance: '1', status: 'weird' }] } }],
+    ['TonAPI 404', () => new TonapiProvider(ENDPOINT), { status: 404, body: { error: 'entity not found' } }],
+    ['TonAPI with an unknown status', () => new TonapiProvider(ENDPOINT), { status: 200, body: { balance: 1, status: 'weird' } }],
+  ])('refuses %s retryably', async (_name, provider, reply) => {
+    stubFetch(() => reply);
+    await expect(provider().getAccountState(ADDRESS)).rejects.toMatchObject({ retryable: true });
   });
 });
 

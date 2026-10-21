@@ -166,6 +166,7 @@ async function finalStatusRecorded(name: string, description: string, hash: stri
 describe('TON mainnet (live)', () => {
   let startBalance: bigint;
   let sent: SentRequest | null = null;
+  let deployedVault: TonWallet | null = null;
 
   beforeAll(async () => {
     recorder.install();
@@ -248,6 +249,7 @@ describe('TON mainnet (live)', () => {
     const hash = await chain.broadcast(boc);
     expect(hash).toBe(request.hash);
     sent = request;
+    deployedVault = vault;
     console.log(`sent ${hash}`);
     const status = await finalStatusRecorded('relay_deploy_sent', 'the deploy relay, sent and final', hash);
     expect(status.status).toBe(TransactionStatusTypes.Success);
@@ -289,6 +291,47 @@ describe('TON mainnet (live)', () => {
     }
     await new Promise((resolve) => setTimeout(resolve, 15_000));
     expect(await chain.getSeqno(feePayer.address)).toBe(seqno);
+  });
+
+  // W5 keeps an internal request's seqno only when the transaction succeeds:
+  // a relayed request that failed stays valid, and executes when delivered
+  // again. Only chain time past validUntil, or a moved seqno, ends it.
+  (env.send ? it : it.skip)('keeps a failed relayed request valid, and it executes when delivered again', async () => {
+    if (deployedVault === null) throw new Error('the deploy relay was not sent');
+    const vault = deployedVault;
+    const seqno = await chain.getSeqno(vault.address);
+    const validUntil = Math.floor(Date.now() / 1000) + VALID_FOR_SECONDS;
+    // More than one relay carries, so the first delivery cannot pay it; everything left returns after.
+    const request = vault.createInternalRequest({
+      seqno,
+      validUntil,
+      messages: [
+        { to: feePayer.address, value: ATTACHED + ATTACHED / 2n, bounce: false, mode: SendMode.PAY_GAS_SEPARATELY },
+        { to: feePayer.address, value: 0n, bounce: false, mode: SendMode.CARRY_ALL_REMAINING_BALANCE },
+      ],
+    });
+    const deliver = async (name: string, description: string): Promise<TonTransactionStatus> => {
+      const relay = feePayer.createExternalRequest({
+        seqno: await chain.getSeqno(feePayer.address),
+        validUntil,
+        messages: [tonRelayMessage({ wallet: vault, request, value: ATTACHED, deploy: false })],
+      });
+      await chain.broadcast(relay.boc);
+      console.log(`sent ${relay.hash} (${name})`);
+      return finalStatusRecorded(name, description, relay.hash);
+    };
+
+    const failed = await deliver('relayed_request_failed', 'a relayed request the vault cannot pay yet; aborted without a bounce');
+    expect(failed.status).toBe(TransactionStatusTypes.Failed);
+    // The relay is bounceable, but an action-phase failure without +16 sends nothing back.
+    expect(failed.summary?.deliveries[0].outcome).toBe('failed');
+    expect(await chain.getSeqno(vault.address)).toBe(seqno);
+    await expect(chain.isRelayedRequestExpired({ wallet: vault.address, seqno, validUntil })).resolves.toBe(false);
+
+    const replayed = await deliver('relayed_request_replayed', 'the same signed request delivered again, now payable');
+    expect(replayed.status).toBe(TransactionStatusTypes.Success);
+    expect(await chain.getSeqno(vault.address)).toBe(seqno + 1);
+    await expect(chain.isRelayedRequestExpired({ wallet: vault.address, seqno, validUntil })).resolves.toBe(false);
   });
 
   (env.send ? it : it.skip)('sends a relay without deploy and reads it Failed', async () => {

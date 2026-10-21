@@ -287,9 +287,10 @@ afterwards whether it did.
 - The live suite (13 tests) also checks both providers against each other:
   the masterchain head, emulation and the sent trace alike, `isRequestExpired`
   on a request never sent and on one that landed, and a resend of a landed
-  message (`NonceTooLow` from both, never landing twice). Last run
-  2026-10-21: 13 passed, 0.0029 TON.
-- 1841 tests pass (83 for TON).
+  message (`NonceTooLow` from both, never landing twice), and a relayed
+  request that failed then executed when delivered again. Last run
+  2026-10-21: 14 passed, 0.0055 TON.
+- 1850 tests pass (92 for TON).
 
 <!-- ====================== PART C - DEVIATIONS ====================== -->
 
@@ -351,9 +352,16 @@ PR: `getomnichain/omnichain#17` (`genichiro-tower:feature/ton-chain` →
     recording one needs jettons on the fee payer.
 - **R8, expiry:** `isRequestExpired({ wallet, seqno, validUntil, hash })`
   uses the chain's clock (the masterchain head's time, 60 s margin), the
-  wallet's seqno and the absence of a trace, never the local clock. A failed
-  or malformed read throws; no provider reads a failure as a 0 seqno or a
-  `NaN` time.
+  wallet's seqno and the absence of a trace, never the local clock, all read
+  from one provider (all repeated on TonAPI if one fails on TON Center). A
+  failed or malformed read throws; no provider reads a failure as a 0 seqno,
+  a `NaN` time or `nonexist`. The seqno is read live from the wallet's
+  get-method, not gated on the indexed account state, which trails a deploy.
+- **R8, relayed requests:** W5 keeps an internal request's seqno only when
+  the transaction succeeds, so a relayed request that failed stays valid and
+  anyone can deliver it again until `validUntil` (seen on mainnet).
+  `isRelayedRequestExpired({ wallet, seqno, validUntil })` says when it is
+  dead; a `Failed` status does not.
 - The root entry exports only `TonAddress`; the family is `./ton`.
 
 ---

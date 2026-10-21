@@ -80,7 +80,11 @@ export interface TonTrace {
 export interface TonProvider {
   readonly name: string;
   getAccountState(address: string): Promise<TonAccountState>;
-  /** The seqno of a deployed wallet; throws when it cannot be read, never reads a failure as 0. */
+  /**
+   * The wallet's seqno, read live by running its get-method: 0 only on the
+   * provider's explicit answer that the account has no code. Throws when it
+   * cannot be read; never reads a failure as 0.
+   */
   getSeqno(address: string): Promise<number>;
   getJettonWalletAddress(jettonMaster: string, owner: string): Promise<string>;
   /** 0 for a jetton wallet that is not deployed. */
@@ -196,6 +200,16 @@ export class TonFallbackProvider implements TonProvider {
 
   getMasterchainHead(): Promise<TonMasterchainHead> {
     return this.call('getMasterchainHead', (p) => p.getMasterchainHead());
+  }
+
+  /**
+   * Runs several reads on one provider throughout: the primary, or — when any
+   * of them fails without an answer — all of them again on the fallback. Reads
+   * that must see the chain at one point never mix providers that lag
+   * differently.
+   */
+  onOneProvider<T>(method: string, run: (provider: TonProvider) => Promise<T>): Promise<T> {
+    return this.call(method, run);
   }
 
   private async call<T>(method: string, run: (provider: TonProvider) => Promise<T>): Promise<T> {
@@ -331,6 +345,12 @@ export function asRequiredInteger(value: unknown, what: string): number {
     throw new TonProviderError(ChainErrorKinds.RpcError, `Malformed TON provider reply: ${what} is missing or not an integer`, true);
   }
   return parsed;
+}
+
+/** An account's status as the provider stated it; anything else says nothing definite. */
+export function asStatedAccountStatus(value: unknown): TonAccountStatus {
+  if (value === 'active' || value === 'frozen' || value === 'uninit' || value === 'nonexist') return value;
+  throw new TonProviderError(ChainErrorKinds.RpcError, `Malformed TON provider reply: unknown account status ${String(value)}`, true);
 }
 
 export function asAccountStatus(value: unknown): TonAccountStatus {

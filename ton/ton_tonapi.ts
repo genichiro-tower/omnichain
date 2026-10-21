@@ -14,6 +14,7 @@ import {
   asBigInt,
   asRecord,
   asRequiredInteger,
+  asStatedAccountStatus,
   assertTraceConsistent,
   definiteError,
   errorMessageOf,
@@ -39,11 +40,12 @@ export class TonapiProvider implements TonProvider {
   constructor(private readonly endpoint: TonHttpEndpoint) {}
 
   async getAccountState(address: string): Promise<TonAccountState> {
+    // TonAPI states `nonexist` for a never-used address; no reply says nothing.
     const reply = await this.get(`/v2/accounts/${encodeURIComponent(tonRawAddress(address))}`);
-    if (reply === null) return { status: 'nonexist', balance: 0n, codeHash: null };
+    if (reply === null) throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} returned no account for ${address}`, true);
     const account = asRecord(reply, 'account');
     return {
-      status: asAccountStatus(account.status),
+      status: asStatedAccountStatus(account.status),
       balance: asBigInt(account.balance, 'balance'),
       codeHash: typeof account.code_hash === 'string' ? account.code_hash : null,
     };

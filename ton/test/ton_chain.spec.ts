@@ -4,7 +4,7 @@ import { CHAIN_ID_TON_MAINNET } from '../../chain_ids.ts';
 import { ChainErrorKinds } from '../../errors.ts';
 import { REQUEST_EXPIRY_MARGIN_SECONDS, TonChain } from '../ton_chain.ts';
 import { TON_JETTON_TRANSFER_OP } from '../ton_messages.ts';
-import { type TonAccountState, TonBroadcastUncertainError, type TonProvider, TonProviderError } from '../ton_provider.ts';
+import { type TonAccountState, TonBroadcastUncertainError, TonFallbackProvider, type TonProvider, TonProviderError } from '../ton_provider.ts';
 import { TonUnsignedTransaction } from '../ton_transactions.ts';
 import { TonWallet } from '../ton_wallet.ts';
 import { JETTON_WALLET, MNEMONIC, OTHER, USDT_MASTER } from './ton_test_helpers.ts';
@@ -40,11 +40,12 @@ describe('TonChain', () => {
     }
   });
 
-  it('reads seqno 0 for an undeployed wallet without asking the provider', async () => {
-    const getSeqno = jest.fn(async () => 9);
-    const chain = chainWith(fakeProvider({ getAccountState: async () => ({ status: 'uninit', balance: 1n, codeHash: null }), getSeqno }));
-    await expect(chain.getSeqno(OTHER)).resolves.toBe(0);
-    expect(getSeqno).not.toHaveBeenCalled();
+  it('reads the seqno live, even while the indexed state still says undeployed', async () => {
+    // A wallet deployed seconds ago: the indexer trails, the get-method does not.
+    const getAccountState = jest.fn(async (): Promise<TonAccountState> => ({ status: 'uninit', balance: 1n, codeHash: null }));
+    const chain = chainWith(fakeProvider({ getAccountState, getSeqno: async () => 1 }));
+    await expect(chain.getSeqno(OTHER)).resolves.toBe(1);
+    expect(getAccountState).not.toHaveBeenCalled();
   });
 
   it('builds a native transfer and a jetton transfer', async () => {
@@ -65,10 +66,7 @@ describe('TonChain', () => {
     const wallet = TonWallet.fromMnemonic(MNEMONIC);
     const transaction = new TonUnsignedTransaction({ chainId: CHAIN_ID_TON_MAINNET, walletAddress: wallet.address, messages: [{ to: OTHER, value: 1n }] });
     const deployed = await wallet.signTransaction(transaction, chainWith(fakeProvider()));
-    const fresh = await wallet.signTransaction(
-      transaction,
-      chainWith(fakeProvider({ getAccountState: async () => ({ status: 'nonexist', balance: 0n, codeHash: null }) })),
-    );
+    const fresh = await wallet.signTransaction(transaction, chainWith(fakeProvider({ getSeqno: async () => 0 })));
     expect(deployed.txHash).toMatch(/^[0-9a-f]{64}$/);
     expect(fresh.boc.length).toBeGreaterThan(deployed.boc.length);
   });
@@ -118,6 +116,35 @@ describe('TonChain', () => {
       },
     });
     await expect(unreadable.isRequestExpired({ wallet: OTHER, seqno: 3, validUntil, hash })).rejects.toThrow('could not run seqno');
+  });
+
+  it('reads all of an expiry check from one provider', async () => {
+    const validUntil = 1_000;
+    const past = validUntil + REQUEST_EXPIRY_MARGIN_SECONDS + 1;
+    const unavailable = (): never => {
+      throw new TonProviderError(ChainErrorKinds.RpcError, 'HTTP 503', true);
+    };
+    // The primary answers the head, then fails the seqno: everything is asked again of the fallback.
+    const primaryHead = jest.fn(async () => ({ seqno: 100, utime: past }));
+    const primary = fakeProvider({ getMasterchainHead: primaryHead, getSeqno: async () => unavailable() });
+    const fallbackHead = jest.fn(async () => ({ seqno: 90, utime: validUntil }));
+    const fallback = fakeProvider({ getMasterchainHead: fallbackHead, getSeqno: async () => 3 });
+    const chain = chainWith(new TonFallbackProvider(primary, fallback));
+    // The fallback's own clock is not past validUntil yet, so it is not expired.
+    await expect(chain.isRequestExpired({ wallet: OTHER, seqno: 3, validUntil, hash: 'ab'.repeat(32) })).resolves.toBe(false);
+    expect(fallbackHead).toHaveBeenCalled();
+  });
+
+  it('keeps a relayed request alive until chain time passes it with the seqno unmoved, whatever its status', async () => {
+    const validUntil = 1_000;
+    const at = (utime: number, seqno: number): TonChain =>
+      chainWith(fakeProvider({ getSeqno: async () => seqno, getMasterchainHead: async () => ({ seqno: 100, utime }) }));
+    const past = validUntil + REQUEST_EXPIRY_MARGIN_SECONDS + 1;
+    // A failed relayed request leaves the seqno where it was: still valid before validUntil.
+    await expect(at(validUntil - 10, 5).isRelayedRequestExpired({ wallet: OTHER, seqno: 5, validUntil })).resolves.toBe(false);
+    await expect(at(past, 5).isRelayedRequestExpired({ wallet: OTHER, seqno: 5, validUntil })).resolves.toBe(true);
+    // The seqno moved past it: it, or another request with its seqno, executed.
+    await expect(at(past, 6).isRelayedRequestExpired({ wallet: OTHER, seqno: 5, validUntil })).resolves.toBe(false);
   });
 
   it('reads TON and jetton balances', async () => {

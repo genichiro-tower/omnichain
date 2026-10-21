@@ -15,6 +15,7 @@ import {
   asAccountStatus,
   asBigInt,
   asRequiredInteger,
+  asStatedAccountStatus,
   assertTraceConsistent,
   asRecord,
   definiteError,
@@ -24,6 +25,8 @@ import {
 } from './ton_provider.ts';
 
 const NAME = 'TON Center';
+/** TON Center's get-method exit code for an account with no code to run. */
+const NO_CODE_EXIT_CODE = -13;
 
 interface ToncenterStackItem {
   type: string;
@@ -37,24 +40,30 @@ export class ToncenterProvider implements TonProvider {
   constructor(private readonly endpoint: TonHttpEndpoint) {}
 
   async getAccountState(address: string): Promise<TonAccountState> {
-    const reply = asRecord(
-      await this.get(`/api/v3/accountStates?address=${encodeURIComponent(tonRawAddress(address))}&include_boc=false`),
-      'accountStates',
-    );
-    const accounts = Array.isArray(reply.accounts) ? reply.accounts : [];
+    const path = `/api/v3/accountStates?address=${encodeURIComponent(tonRawAddress(address))}&include_boc=false`;
+    const reply = await tonHttpJson(NAME, this.endpoint, path, { headers: this.headers() });
+    // Only an explicit empty list means a never-used address.
+    if (reply === null || !Array.isArray((reply as Record<string, unknown>).accounts)) {
+      throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} returned no account list for ${address}`, true);
+    }
+    const accounts = (reply as Record<string, unknown[]>).accounts;
     if (accounts.length === 0) return { status: 'nonexist', balance: 0n, codeHash: null };
     const account = asRecord(accounts[0], 'account');
     const balance = asBigInt(account.balance, 'balance');
-    let status = asAccountStatus(account.status);
+    let status = asStatedAccountStatus(account.status);
     // TON Center reports a never-touched address as `uninit`; it has no history.
     if (status === 'uninit' && balance === 0n && (account.last_transaction_lt ?? '0') === '0') status = 'nonexist';
     return { status, balance, codeHash: typeof account.code_hash === 'string' ? account.code_hash : null };
   }
 
   async getSeqno(address: string): Promise<number> {
-    const result = await this.runGetMethod(address, 'seqno', []);
-    if (result === null) throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} could not run seqno on ${address}`, true);
-    return asRequiredInteger(String(numAt(result, 0, 'seqno')), 'seqno');
+    const reply = await this.runGetMethodReply(address, 'seqno', []);
+    const exitCode = Number(reply.exit_code);
+    if (errorMessageOf(reply) === null && exitCode === NO_CODE_EXIT_CODE) return 0;
+    if (errorMessageOf(reply) !== null || exitCode !== 0 || !Array.isArray(reply.stack)) {
+      throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} could not run seqno on ${address}`, true);
+    }
+    return asRequiredInteger(String(numAt(reply.stack as ToncenterStackItem[], 0, 'seqno')), 'seqno');
   }
 
   async getJettonWalletAddress(jettonMaster: string, owner: string): Promise<string> {
@@ -120,16 +129,19 @@ export class ToncenterProvider implements TonProvider {
 
   /** The stack of a get-method that ran, or `null` when the account has no code to run it. */
   private async runGetMethod(address: string, method: string, stack: ToncenterStackItem[]): Promise<ToncenterStackItem[] | null> {
-    const reply = asRecord(
-      await tonHttpJson(NAME, this.endpoint, '/api/v3/runGetMethod', {
-        method: 'POST',
-        body: { address: tonRawAddress(address), method, stack },
-        headers: this.headers(),
-      }),
-      'runGetMethod',
-    );
+    const reply = await this.runGetMethodReply(address, method, stack);
     if (errorMessageOf(reply) !== null || Number(reply.exit_code ?? 0) !== 0) return null;
     return Array.isArray(reply.stack) ? (reply.stack as ToncenterStackItem[]) : [];
+  }
+
+  private async runGetMethodReply(address: string, method: string, stack: ToncenterStackItem[]): Promise<Record<string, unknown>> {
+    const reply = await tonHttpJson(NAME, this.endpoint, '/api/v3/runGetMethod', {
+      method: 'POST',
+      body: { address: tonRawAddress(address), method, stack },
+      headers: this.headers(),
+    });
+    if (reply === null) throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} runGetMethod returned nothing`, true);
+    return asRecord(reply, 'runGetMethod');
   }
 
   private async get(path: string): Promise<unknown> {

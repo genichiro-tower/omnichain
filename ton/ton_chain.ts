@@ -144,10 +144,12 @@ export class TonChain extends Chain {
     return this.provider.getAccountState(tonRawAddress(address));
   }
 
-  /** 0 while the wallet is not deployed. */
-  async getSeqno(address: string): Promise<number> {
-    const state = await this.getAccountState(address);
-    return state.status === 'active' ? this.provider.getSeqno(tonRawAddress(address)) : 0;
+  /**
+   * The wallet's seqno, read live from its get-method rather than from the
+   * indexed account state, which can trail a deploy; 0 while it has no code.
+   */
+  getSeqno(address: string): Promise<number> {
+    return this.provider.getSeqno(tonRawAddress(address));
   }
 
   /** The jetton wallet `owner` has (or will have) for `jettonMaster`, raw. */
@@ -278,16 +280,47 @@ export class TonChain extends Chain {
   }
 
   /**
-   * Whether the request `hash`, signed with `seqno` and `validUntil`, can no
-   * longer land, so signing a replacement cannot pay twice: the chain's own
-   * time (not this machine's) is past `validUntil` by a margin, the wallet's
-   * seqno never moved past the request's, and no trace of it exists.
+   * Whether the external request `hash` that `wallet` signed with `seqno` and
+   * `validUntil` can no longer land, so signing a replacement cannot pay twice:
+   * the chain's own time (not this machine's) is past `validUntil` by a
+   * margin, the wallet's seqno never moved past the request's, and no trace of
+   * it exists. All three are read from one provider.
+   *
+   * For a relay this covers the relayer's request only; each request it
+   * carried needs `isRelayedRequestExpired`.
    */
-  async isRequestExpired(args: { wallet: string; seqno: number; validUntil: number; hash: string }): Promise<boolean> {
-    const head = await this.provider.getMasterchainHead();
-    if (head.utime <= args.validUntil + REQUEST_EXPIRY_MARGIN_SECONDS) return false;
-    if ((await this.getSeqno(args.wallet)) > args.seqno) return false;
-    return (await this.provider.getTrace(args.hash)) === null;
+  isRequestExpired(args: { wallet: string; seqno: number; validUntil: number; hash: string }): Promise<boolean> {
+    return this.onOneProvider('isRequestExpired', async (provider) => {
+      if (!(await this.chainTimeIsPast(provider, args.validUntil))) return false;
+      if ((await provider.getSeqno(tonRawAddress(args.wallet))) > args.seqno) return false;
+      return (await provider.getTrace(args.hash)) === null;
+    });
+  }
+
+  /**
+   * Whether a request `wallet` signed for a relayer (`createInternalRequest`)
+   * with `seqno` and `validUntil` can no longer execute. A relayed request
+   * that failed in the wallet leaves its seqno unchanged — W5 keeps the seqno
+   * of an internal request only when the transaction succeeds — so it stays
+   * valid, and anyone can deliver it again from the trace, until `validUntil`.
+   * A `Failed` status does not end it; this does: the chain's time is past
+   * `validUntil` by a margin and the wallet's seqno never moved past the
+   * request's. Both are read from one provider.
+   */
+  isRelayedRequestExpired(args: { wallet: string; seqno: number; validUntil: number }): Promise<boolean> {
+    return this.onOneProvider('isRelayedRequestExpired', async (provider) => {
+      if (!(await this.chainTimeIsPast(provider, args.validUntil))) return false;
+      return (await provider.getSeqno(tonRawAddress(args.wallet))) <= args.seqno;
+    });
+  }
+
+  private onOneProvider<T>(method: string, run: (provider: TonProvider) => Promise<T>): Promise<T> {
+    const provider = this.provider;
+    return provider instanceof TonFallbackProvider ? provider.onOneProvider(method, run) : run(provider);
+  }
+
+  private async chainTimeIsPast(provider: TonProvider, validUntil: number): Promise<boolean> {
+    return (await provider.getMasterchainHead()).utime > validUntil + REQUEST_EXPIRY_MARGIN_SECONDS;
   }
 
   /** TON addresses do not reveal their key, so a signature cannot be checked against one. */
