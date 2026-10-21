@@ -96,6 +96,18 @@ describe('TonTransactionStatus', () => {
     expect(status.summary?.bouncedMessages).toHaveLength(1);
   });
 
+  it('is Failed when a wallet skipped a message it could not send', async () => {
+    const trace = await realTrace();
+    const [root] = trace.transactions;
+    const status = TonTransactionStatus.fromTrace({
+      chainId: CHAIN_ID_TON_MAINNET,
+      trace: { complete: true, transactions: [{ ...root, success: false, skippedActions: 1, outMsgs: [] }] },
+      masterchainTip: 100472540,
+    });
+    expect(status.status).toBe(TransactionStatusTypes.Failed);
+    expect(status.error?.code).toBe('skipped_actions');
+  });
+
   it('reads the jettons a jetton wallet accepted', async () => {
     const trace = await realTrace();
     const [, child] = trace.transactions;

@@ -32,11 +32,16 @@ export interface TonTraceTransaction {
   /** Canonical raw address. */
   account: string;
   /**
-   * Compute and action phases succeeded. A compute phase skipped because the
-   * account has no code yet (a plain transfer to an undeployed address) counts
-   * as success.
+   * Compute and action phases succeeded and no action was skipped. A compute
+   * phase skipped because the account has no code yet (a plain transfer to an
+   * undeployed address) counts as success. A W5 external request sends every
+   * message with "ignore errors", so a message it could not send is skipped
+   * with the action phase still reporting success — `skippedActions` is the
+   * only sign, and it fails the transaction.
    */
   success: boolean;
+  /** Actions the action phase skipped (messages not sent). */
+  skippedActions: number;
   aborted: boolean;
   computeExitCode: number | null;
   actionResultCode: number | null;

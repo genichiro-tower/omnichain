@@ -176,11 +176,13 @@ function toTransaction(tx: Record<string, unknown>, mcSeqno: number | null): Ton
   const compute = tx.compute_phase === undefined ? null : asRecord(tx.compute_phase, 'compute_phase');
   const action = tx.action_phase === undefined || tx.action_phase === null ? null : asRecord(tx.action_phase, 'action_phase');
   const computeOk = compute === null || (compute.skipped === true ? compute.skip_reason === 'cskip_no_state' : compute.success === true);
-  const actionOk = action === null || action.success === true;
+  const skippedActions = action === null ? 0 : Number(action.skipped_actions ?? 0);
+  const actionOk = action === null || (action.success === true && skippedActions === 0);
   return {
     hash: raw.hash().toString('hex'),
     account: tonRawAddress(String(asRecord(tx.account, 'account').address)),
     success: computeOk && actionOk,
+    skippedActions,
     aborted: tx.aborted === true,
     computeExitCode: compute === null || compute.skipped === true ? null : Number(compute.exit_code),
     actionResultCode: action === null ? null : Number(action.result_code),

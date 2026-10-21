@@ -171,10 +171,15 @@ export class TonTransactionStatus extends TransactionStatus {
     const error: TransactionErrorInfo =
       failed === undefined
         ? { code: 'bounced', reason: `${summary.bouncedMessages.length} message(s) bounced` }
-        : {
-            code: String(failed.computeExitCode ?? failed.actionResultCode ?? 'failed'),
-            reason: `transaction ${failed.hash} on ${failed.account} failed`,
-          };
+        : failed.skippedActions > 0
+          ? {
+              code: 'skipped_actions',
+              reason: `transaction ${failed.hash} on ${failed.account} skipped ${failed.skippedActions} message(s)`,
+            }
+          : {
+              code: String(failed.computeExitCode ?? failed.actionResultCode ?? 'failed'),
+              reason: `transaction ${failed.hash} on ${failed.account} failed`,
+            };
     return new TonTransactionStatus({ ...common, status: TransactionStatusTypes.Failed, error });
   }
 }

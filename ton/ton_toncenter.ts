@@ -148,12 +148,14 @@ function toTransaction(tx: Record<string, unknown>): TonTraceTransaction {
   const compute = description.compute_ph === undefined ? null : asRecord(description.compute_ph, 'compute_ph');
   const action = description.action === undefined || description.action === null ? null : asRecord(description.action, 'action');
   const computeOk = compute === null || (compute.skipped === true ? compute.reason === 'no_state' : compute.success === true);
-  const actionOk = action === null || action.success === true;
+  const skippedActions = action === null ? 0 : Number(action.skipped_actions ?? 0);
+  const actionOk = action === null || (action.success === true && skippedActions === 0);
   const finalized = tx.finality === undefined || tx.finality === 'finalized';
   return {
     hash: base64ToHex(String(tx.hash)),
     account: tonRawAddress(String(tx.account)),
     success: computeOk && actionOk,
+    skippedActions,
     aborted: description.aborted === true,
     computeExitCode: compute === null || compute.skipped === true ? null : Number(compute.exit_code),
     actionResultCode: action === null ? null : Number(action.result_code),

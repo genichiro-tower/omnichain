@@ -148,6 +148,25 @@ describe('trace normalization', () => {
     expect(fromTonapi[0].mcSeqno).toBe(100472527);
   });
 
+  it('fails a transaction whose action phase skipped a message, on both providers', async () => {
+    const toncenter = fixture('toncenter_trace.json') as { traces: Array<{ trace: { tx_hash: string }; transactions: Record<string, { description: { action: Record<string, unknown> } }> }> };
+    const root = toncenter.traces[0].transactions[toncenter.traces[0].trace.tx_hash];
+    root.description.action = { ...root.description.action, success: true, skipped_actions: 1, msgs_created: 0 };
+    stubFetch(() => ({ status: 200, body: toncenter }));
+    const fromToncenter = await new ToncenterProvider(ENDPOINT).getTrace(TRACE_HASH);
+    expect(fromToncenter?.transactions[0]).toMatchObject({ success: false, skippedActions: 1 });
+
+    const tonapi = fixture('tonapi_trace.json') as { transaction: { action_phase: Record<string, unknown> } };
+    tonapi.transaction.action_phase = { ...tonapi.transaction.action_phase, success: true, skipped_actions: 1 };
+    stubFetch((url) =>
+      url.includes('/v2/blockchain/blocks/')
+        ? { status: 200, body: { master_ref: '(-1,8000000000000000,100472527)' } }
+        : { status: 200, body: tonapi },
+    );
+    const fromTonapi = await new TonapiProvider(ENDPOINT).getTrace(TRACE_HASH);
+    expect(fromTonapi?.transactions[0]).toMatchObject({ success: false, skippedActions: 1 });
+  });
+
   it('reads an unseen message as no trace', async () => {
     stubFetch(() => ({ status: 200, body: { traces: [] } }));
     await expect(new ToncenterProvider(ENDPOINT).getTrace(TRACE_HASH)).resolves.toBeNull();
