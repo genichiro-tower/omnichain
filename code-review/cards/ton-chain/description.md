@@ -267,12 +267,15 @@ afterwards whether it did.
 # Verification
 
 - Typecheck and the ESM and CJS builds are clean.
-- Real replies recorded from both providers; one test checks they normalize
-  the same trace identically.
+- Real replies from both providers in the unit fixtures; one test checks
+  they normalize the same trace identically. The replayed mainnet recordings
+  (`mainnet_recordings.json`) hold TON Center replies only; TonAPI is checked
+  against TON Center live.
 - The SLIP-0010 derivation matches the spec vectors; the normalized external
   hash matches TON Center's `hash_norm` on a real message.
-- `code-review/code_reviewer.py`: 5 rounds, round 5 has no Critical; round 6
-  after the matching change and the test setup.
+- `code-review/code_reviewer.py`: 5 rounds, round 5 has no Critical; rounds
+  6 and 7 had no Critical; the three double-spend Mediums of round 7 are
+  fixed.
 - AC3 and AC4 on mainnet (`npm run test:live:ton`, 2026-10-21, fee payer
   `UQBCC5glBygg10SwcXZdY4Ssd6NgCNcm0qZLrQaVw4sPsQfx`):
   - a relay deploying a fresh vault emulated and sent (`f090af72…`): Success,
@@ -281,7 +284,12 @@ afterwards whether it did.
     `bounced`, value back to the fee payer;
   - the run spent 0.0029 TON; the replies are recorded and replayed under
     `npm test`.
-- 1825 tests pass (67 for TON).
+- The live suite (13 tests) also checks both providers against each other:
+  the masterchain head, emulation and the sent trace alike, `isRequestExpired`
+  on a request never sent and on one that landed, and a resend of a landed
+  message (`NonceTooLow` from both, never landing twice). Last run
+  2026-10-21: 13 passed, 0.0029 TON.
+- 1841 tests pass (83 for TON).
 
 <!-- ====================== PART C - DEVIATIONS ====================== -->
 
