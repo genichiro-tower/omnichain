@@ -1,4 +1,5 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { parseEnv } from 'node:util';
 
 import { SendMode } from '@ton/core';
 
@@ -22,8 +23,14 @@ import { FetchRecorder, type RecordedScenario, type Recordings, writeRecordings 
  * only fees.
  */
 
+// Jest gives each test file its own copy of process.env, which
+// process.loadEnvFile would not reach, so the file is parsed into this copy.
 const ENV_FILE = new URL('../../../.env.ton.local', import.meta.url);
-if (existsSync(ENV_FILE)) process.loadEnvFile(ENV_FILE);
+if (existsSync(ENV_FILE)) {
+  for (const [name, value] of Object.entries(parseEnv(readFileSync(ENV_FILE, 'utf8')))) {
+    process.env[name] ??= value;
+  }
+}
 
 const NANO = 1_000_000_000n;
 const ATTACHED = 50_000_000n; // TON the relay carries; the vault sends all of it back
