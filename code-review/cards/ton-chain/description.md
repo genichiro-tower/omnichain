@@ -287,7 +287,12 @@ PR: `getomnichain/omnichain#17` (`genichiro-tower:feature/ton-chain` →
   first hop of each message they sent (a jetton transfer at the receiver's
   jetton wallet), with `summary.deliveries` per message; failures further
   down do not fail it. Codes: `skipped_actions`, `request_not_executed`,
-  `bounced`, `undelivered`, `jetton_bounced`, `jetton_undelivered`.
+  `bounced`, `receiver_failed`, `undelivered`, `jetton_bounced`,
+  `jetton_receiver_failed`, `jetton_undelivered`. A message is `bounced`
+  only when the receiver's transaction sent it back (a failed compute phase,
+  or a failed action with send mode +16, with value left for the bounce); a
+  receiver that aborted without sending it back makes it `failed` — the value
+  did not return.
 - **R8, matching:** each message a sending wallet sent is matched to the
   transaction that received it by (source, `created_lt`), which names one
   message. Each provider checks a trace before returning it: every internal
@@ -333,7 +338,6 @@ PR: `getomnichain/omnichain#17` (`genichiro-tower:feature/ton-chain` →
 
 # Follow-ups raised
 
-The review's remaining Medium items (PR #17, "Known open items"):
-aborted-without-bounce, 404 / failed get-method read as 0, `jettonCredits` /
+The review's remaining Medium items (PR #17, "Known open items"): 404 / failed get-method read as 0, `jettonCredits` /
 `failedTransactions` predicates, emulation `ignoreSignature` and sender fees,
 native bounce flag, pinned `@ton/*`, the fallback log line.

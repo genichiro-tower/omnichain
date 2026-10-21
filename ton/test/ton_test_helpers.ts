@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 
-import type { TonTrace } from '../ton_provider.ts';
+import type { TonTrace, TonTraceMessage, TonTraceTransaction } from '../ton_provider.ts';
 import { ToncenterProvider } from '../ton_toncenter.ts';
 
 export const MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
@@ -18,4 +18,18 @@ export async function realTrace(): Promise<TonTrace> {
   } finally {
     globalThis.fetch = realFetch;
   }
+}
+
+/** `receiver` aborted and sent its incoming message back, as TON's bounce phase does. */
+export function bouncing(receiver: TonTraceTransaction): TonTraceTransaction {
+  const inMsg = receiver.inMsg as TonTraceMessage;
+  const bounce: TonTraceMessage = {
+    ...inMsg,
+    source: receiver.account,
+    destination: inMsg.source,
+    bounce: false,
+    bounced: true,
+    createdLt: (inMsg.createdLt ?? 0n) + 1n,
+  };
+  return { ...receiver, success: false, aborted: true, outMsgs: [...receiver.outMsgs, bounce] };
 }

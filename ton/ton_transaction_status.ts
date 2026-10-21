@@ -33,6 +33,12 @@ export type TonDeliveryOutcome =
   | 'delivered'
   /** Its destination failed or had no code, and the value (or the jettons) came back. */
   | 'bounced'
+  /**
+   * A bounceable message whose destination failed without sending it back —
+   * an action phase that failed without send mode +16, or too little value
+   * left to pay for the bounce. The value stayed there or went on fees.
+   */
+  | 'failed'
   /** The trace is complete but no transaction received it. */
   | 'undelivered'
   /** The trace is still running. */
@@ -168,9 +174,10 @@ function judgeRequest(trace: TonTrace): { problem: TonRequestProblem | null; del
         outcome,
         transaction: jettonHop?.receiver?.hash ?? receiver?.hash ?? null,
       });
-      if (outcome === 'bounced' || outcome === 'undelivered') {
+      if (outcome === 'bounced' || outcome === 'undelivered' || outcome === 'failed') {
+        const code = outcome === 'failed' ? 'receiver_failed' : outcome;
         note({
-          code: jettonHop === null ? outcome : `jetton_${outcome}`,
+          code: jettonHop === null ? code : `jetton_${code}`,
           reason: `a ${jettonHop === null ? 'message' : 'jetton transfer'} from ${wallet.account} to ${message.destination} was ${outcome}`,
         });
       }
@@ -195,12 +202,15 @@ function deliveryOf(
     received.find((tx) => tx.inMsg !== null && tx.inMsg.source === message.source && tx.inMsg.createdLt === message.createdLt) ??
     null;
   if (receiver === null) return { receiver, outcome: complete ? 'undelivered' : 'pending' };
-  // TON bounces a bounceable message only when its receiver's transaction
-  // aborted — a failed compute or action phase, or no code yet. A receiver that
-  // merely skipped one of its own sends (e.g. an excess refund under "ignore
-  // errors") kept the value.
-  const bouncedBack = message.bounce && receiver.aborted;
-  return { receiver, outcome: bouncedBack ? 'bounced' : 'delivered' };
+  // A receiver that did not abort kept the value, even if it skipped one of its
+  // own sends (e.g. an excess refund under "ignore errors"); so did one a
+  // non-bounceable message reached. An aborted receiver of a bounceable message
+  // sends it back only on a failed compute phase (no code yet included), a
+  // failed action with send mode +16, and when the value covers the bounce;
+  // the bounce is in the receiver's own transaction.
+  if (!message.bounce || !receiver.aborted) return { receiver, outcome: 'delivered' };
+  const bouncedBack = receiver.outMsgs.some((m) => m.bounced && m.destination === message.source);
+  return { receiver, outcome: bouncedBack ? 'bounced' : 'failed' };
 }
 
 /** The `internal_transfer` the sender's jetton wallet sent on, judged where the jettons land. */

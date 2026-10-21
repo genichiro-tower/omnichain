@@ -297,6 +297,8 @@ describe('TON mainnet (live)', () => {
     console.log(`sent ${hash}`);
     const status = await finalStatusRecorded('relay_without_deploy_sent', 'a relay without deploy, sent; bounced back to the fee payer', hash);
     expect(status.status).toBe(TransactionStatusTypes.Failed);
+    // The undeployed vault's compute phase was skipped, so TON sent the value back.
+    expect(status.summary?.deliveries.map((d) => d.outcome)).toEqual(['bounced']);
   });
 
   (env.send ? it : it.skip)('spent no more than the cap', async () => {
