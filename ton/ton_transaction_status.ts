@@ -10,7 +10,7 @@ import {
   assetHashOf,
 } from '../transaction_status.ts';
 import { TonAsset } from './ton_asset.ts';
-import { TON_JETTON_INTERNAL_TRANSFER_OP, TON_W5_SIGNED_INTERNAL_OP } from './ton_messages.ts';
+import { TON_JETTON_INTERNAL_TRANSFER_OP, TON_JETTON_TRANSFER_OP, TON_W5_SIGNED_INTERNAL_OP } from './ton_messages.ts';
 import type { TonTrace, TonTraceMessage, TonTraceTransaction } from './ton_provider.ts';
 
 /** Jettons a jetton wallet received in a trace (a TEP-74 `internal_transfer` it accepted). */
@@ -24,9 +24,13 @@ export interface TonJettonCredit {
 
 /** What happened to one message a wallet sent. */
 export type TonDeliveryOutcome =
-  /** Its destination received it (a non-bounceable message is delivered even if the receiver then failed). */
+  /**
+   * Its destination kept it (a non-bounceable message is delivered even if the
+   * receiver then failed). For a jetton transfer, the receiver's jetton wallet
+   * accepted the jettons.
+   */
   | 'delivered'
-  /** Its destination failed and the value came back. */
+  /** Its destination failed or had no code, and the value (or the jettons) came back. */
   | 'bounced'
   /** The trace is complete but no transaction received it. */
   | 'undelivered'
@@ -139,35 +143,61 @@ function judgeRequest(trace: TonTrace): { problem: TonRequestProblem | null; del
           : { code: String(wallet.computeExitCode ?? wallet.actionResultCode ?? 'failed'), reason: `${wallet.account} failed in ${wallet.hash}` },
       );
     }
-    const sent = wallet.outMsgs.filter((m) => m.destination !== null);
+    // A bounce the wallet sends back is not a message it was asked to send.
+    const sent = wallet.outMsgs.filter((m) => m.destination !== null && !m.bounced);
     if (wallet !== root && wallet.success && sent.length === 0) {
       note({ code: 'request_not_executed', reason: `${wallet.account} did not execute the relayed request (bad signature or seqno)` });
     }
     const received = [...(children.get(wallet.hash) ?? [])];
     for (const message of sent) {
-      const index = received.findIndex((tx) => tx.account === message.destination && tx.inMsg?.value === message.value);
-      const receiver = index === -1 ? null : received.splice(index, 1)[0];
-      const outcome: TonDeliveryOutcome =
-        receiver === null
-          ? trace.complete
-            ? 'undelivered'
-            : 'pending'
-          : receiver.success || !message.bounce
-            ? 'delivered'
-            : 'bounced';
+      const { receiver, outcome: firstHop } = deliveryOf(message, received, trace.complete);
+      // A jetton transfer moves the jettons one hop later, in the receiver's jetton wallet.
+      const jettonHop =
+        firstHop === 'delivered' && message.opcode === TON_JETTON_TRANSFER_OP && receiver !== null
+          ? jettonDeliveryOf(receiver, children.get(receiver.hash) ?? [], trace.complete)
+          : null;
+      const outcome = jettonHop?.outcome ?? firstHop;
       deliveries.push({
         from: wallet.account,
         to: message.destination as string,
         value: message.value,
         outcome,
-        transaction: receiver?.hash ?? null,
+        transaction: jettonHop?.receiver?.hash ?? receiver?.hash ?? null,
       });
       if (outcome === 'bounced' || outcome === 'undelivered') {
-        note({ code: outcome, reason: `a message from ${wallet.account} to ${message.destination} was ${outcome}` });
+        note({
+          code: jettonHop === null ? outcome : `jetton_${outcome}`,
+          reason: `a ${jettonHop === null ? 'message' : 'jetton transfer'} from ${wallet.account} to ${message.destination} was ${outcome}`,
+        });
       }
     }
   }
   return { problem, deliveries };
+}
+
+/** Which received transaction took `message`, and whether it kept the value. */
+function deliveryOf(
+  message: TonTraceMessage,
+  received: TonTraceTransaction[],
+  complete: boolean,
+): { receiver: TonTraceTransaction | null; outcome: TonDeliveryOutcome } {
+  const index = received.findIndex((tx) => tx.account === message.destination && tx.inMsg?.value === message.value);
+  const receiver = index === -1 ? null : received.splice(index, 1)[0];
+  if (receiver === null) return { receiver, outcome: complete ? 'undelivered' : 'pending' };
+  // A bounceable message comes back when its receiver fails or aborts (e.g. it has no code yet).
+  const bouncedBack = message.bounce && (!receiver.success || receiver.aborted);
+  return { receiver, outcome: bouncedBack ? 'bounced' : 'delivered' };
+}
+
+/** The `internal_transfer` the sender's jetton wallet sent on, judged where the jettons land. */
+function jettonDeliveryOf(
+  senderJettonWallet: TonTraceTransaction,
+  received: TonTraceTransaction[],
+  complete: boolean,
+): { receiver: TonTraceTransaction | null; outcome: TonDeliveryOutcome } {
+  const transfer = senderJettonWallet.outMsgs.find((m) => m.opcode === TON_JETTON_INTERNAL_TRANSFER_OP && !m.bounced);
+  if (transfer === undefined) return { receiver: null, outcome: complete ? 'undelivered' : 'pending' };
+  return deliveryOf(transfer, [...received], complete);
 }
 
 function childrenByParent(transactions: readonly TonTraceTransaction[]): Map<string, TonTraceTransaction[]> {
