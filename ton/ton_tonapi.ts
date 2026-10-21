@@ -15,6 +15,7 @@ import {
   assertTraceConsistent,
   definiteError,
   errorMessageOf,
+  tonBroadcastReply,
   tonHttpJson,
   tonTraceMessageOf,
 } from './ton_provider.ts';
@@ -25,6 +26,8 @@ const BLOCK_ID_REGEX = /^\((-?\d+),([0-9a-fA-F]+),(\d+)\)$/;
 interface TonapiTraceNode {
   transaction: Record<string, unknown>;
   children?: TonapiTraceNode[];
+  /** TonAPI's prediction for a message still in flight, not a transaction on chain. */
+  emulated?: boolean;
 }
 
 /** TonAPI (`/v2`), the fallback provider. */
@@ -68,7 +71,10 @@ export class TonapiProvider implements TonProvider {
   }
 
   async sendBoc(boc: string): Promise<void> {
-    const reply = await tonHttpJson(NAME, this.endpoint, '/v2/blockchain/message', { method: 'POST', body: { boc }, headers: this.headers() });
+    const reply = await tonBroadcastReply(
+      NAME,
+      tonHttpJson(NAME, this.endpoint, '/v2/blockchain/message', { method: 'POST', body: { boc }, headers: this.headers() }),
+    );
     const error = errorMessageOf(reply);
     if (error !== null) throw definiteError(ChainErrorKinds.BroadcastRejected, `${NAME} refused the message: ${error}`);
   }
@@ -76,7 +82,10 @@ export class TonapiProvider implements TonProvider {
   async getTrace(hash: string): Promise<TonTrace | null> {
     const reply = await this.get(`/v2/traces/${hash}`);
     if (reply === null) return null;
-    const root = reply as TonapiTraceNode;
+    // TonAPI answers a message still in flight with its emulation; only what
+    // is on chain counts, and a predicted hop leaves the trace incomplete.
+    if ((reply as TonapiTraceNode).emulated === true) return null;
+    const root = withoutEmulated(reply as TonapiTraceNode);
     const transactions = await this.withMasterchainSeqnos(flatten(root));
     return assertTraceConsistent(NAME, { complete: isComplete(root), transactions });
   }
@@ -159,6 +168,10 @@ function flatten(root: TonapiTraceNode): FlatTransaction[] {
     queue.push(...(node.children ?? []).map((child) => ({ node: child, parent: hash })));
   }
   return ordered;
+}
+
+function withoutEmulated(node: TonapiTraceNode): TonapiTraceNode {
+  return { ...node, children: (node.children ?? []).filter((child) => child.emulated !== true).map(withoutEmulated) };
 }
 
 /** Every internal message a transaction sent has reached its destination's transaction. */

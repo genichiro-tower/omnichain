@@ -246,11 +246,48 @@ describe('trace normalization', () => {
     expect(trace?.transactions[0].parent).toBe(TRACE_HASH);
   });
 
+  it("reads TonAPI's prediction for a message in flight as no trace, and a predicted hop as incomplete", async () => {
+    const masterRef = { status: 200, body: { master_ref: '(-1,8000000000000000,100472527)' } };
+    const predicted = { ...(fixture('tonapi_trace.json') as Record<string, unknown>), emulated: true };
+    stubFetch((url) => (url.includes('/v2/blockchain/blocks/') ? masterRef : { status: 200, body: predicted }));
+    await expect(new TonapiProvider(ENDPOINT).getTrace(TRACE_HASH)).resolves.toBeNull();
+
+    const partly = fixture('tonapi_trace.json') as { children: Array<Record<string, unknown>> };
+    partly.children[0].emulated = true;
+    stubFetch((url) => (url.includes('/v2/blockchain/blocks/') ? masterRef : { status: 200, body: partly }));
+    const trace = await new TonapiProvider(ENDPOINT).getTrace(TRACE_HASH);
+    expect(trace?.complete).toBe(false);
+    expect(trace?.transactions.map((tx) => tx.hash)).toEqual([TRACE_HASH]);
+  });
+
   it('reads an unseen message as no trace', async () => {
     stubFetch(() => ({ status: 200, body: { traces: [] } }));
     await expect(new ToncenterProvider(ENDPOINT).getTrace(TRACE_HASH)).resolves.toBeNull();
     stubFetch(() => ({ status: 404, body: { error: 'entity not found' } }));
     await expect(new TonapiProvider(ENDPOINT).getTrace(TRACE_HASH)).resolves.toBeNull();
+  });
+});
+
+describe('broadcast', () => {
+  const REFUSAL = 'cannot apply external message to current state : inbound external message rejected by transaction 420B98...: exitcode=33';
+
+  it('reads the lite server refusing a message as definite on both providers', async () => {
+    stubFetch(() => ({ status: 500, body: { error: `LITE_SERVER_UNKNOWN: ${REFUSAL}`, code: 500 } }));
+    const fromToncenter = await new ToncenterProvider(ENDPOINT).sendBoc('boc').catch((e: unknown) => e);
+    expect(fromToncenter).toMatchObject({ kind: ChainErrorKinds.BroadcastRejected, retryable: false });
+    stubFetch(() => ({ status: 406, body: { error: `lite server error, code -701: ${REFUSAL}` } }));
+    const fromTonapi = await new TonapiProvider(ENDPOINT).sendBoc('boc').catch((e: unknown) => e);
+    expect(fromTonapi).toMatchObject({ kind: ChainErrorKinds.BroadcastRejected, retryable: false });
+  });
+
+  it('reads the lite server already having the message as sent', async () => {
+    stubFetch(() => ({ status: 500, body: { error: 'lite server error, code 0: cannot send external message : duplicate message' } }));
+    await expect(new TonapiProvider(ENDPOINT).sendBoc('boc')).resolves.toBeUndefined();
+  });
+
+  it('keeps any other 5xx retryable', async () => {
+    stubFetch(() => ({ status: 503, body: { error: 'overloaded' } }));
+    await expect(new ToncenterProvider(ENDPOINT).sendBoc('boc')).rejects.toMatchObject({ kind: ChainErrorKinds.RpcError, retryable: true });
   });
 });
 

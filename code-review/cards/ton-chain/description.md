@@ -309,7 +309,12 @@ PR: `getomnichain/omnichain#17` (`genichiro-tower:feature/ton-chain` →
     `npm test`.
   - `npm run test:live:ton` (`ton/test/live/ton_mainnet.live.ts`,
     `jest.live.config.mjs`, never part of `npm test`) runs AC3 and AC4 on
-    mainnet. It reads, and emulates by default; `TON_LIVE_SEND=1` broadcasts
+    mainnet, plus the provider behaviour the SDK relies on: the masterchain
+    head's time, emulation and sent traces alike on both providers,
+    `isRequestExpired`, and a resend of a landed message (refused, accepted
+    or "duplicate", never landing twice; TonAPI serves its emulation of a
+    message in flight as its trace, which is read as no trace). It reads,
+    and emulates by default; `TON_LIVE_SEND=1` broadcasts
     and `TON_LIVE_RECORD=1` rewrites the recordings. The vault returns
     everything to the fee payer, so a run costs only fees, under
     `TON_LIVE_MAX_SPEND_NANO`.

@@ -255,6 +255,32 @@ export async function tonHttpJson(
   return payload;
 }
 
+const EXTERNAL_MESSAGE_REFUSED = /cannot apply external message/i;
+const EXTERNAL_MESSAGE_DUPLICATE = /duplicate message/i;
+
+/**
+ * The reply to a broadcast, read for what the lite server said rather than
+ * the HTTP status (both answers come as HTTP 500 from TON Center, and from
+ * TonAPI as 500 or 406):
+ * - "duplicate message": the network already has this exact message, so the
+ *   broadcast succeeded;
+ * - "cannot apply external message": the wallet does not accept it now — a
+ *   definite `BroadcastRejected`, though the same message may have landed
+ *   earlier.
+ */
+export async function tonBroadcastReply(provider: string, reply: Promise<unknown>): Promise<unknown> {
+  try {
+    return await reply;
+  } catch (err) {
+    if (!(err instanceof TonProviderError)) throw err;
+    if (EXTERNAL_MESSAGE_DUPLICATE.test(err.message)) return {};
+    if (EXTERNAL_MESSAGE_REFUSED.test(err.message)) {
+      throw new TonProviderError(ChainErrorKinds.BroadcastRejected, `${provider} refused the message: ${err.message}`, false, undefined, err);
+    }
+    throw err;
+  }
+}
+
 /** The `error` field some replies carry with a 2xx status. */
 export function errorMessageOf(payload: unknown): string | null {
   if (payload === null || typeof payload !== 'object') return null;

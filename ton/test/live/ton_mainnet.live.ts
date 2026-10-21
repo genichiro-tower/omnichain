@@ -3,11 +3,16 @@ import { parseEnv } from 'node:util';
 
 import { SendMode } from '@ton/core';
 
+import { CHAIN_ID_TON_MAINNET } from '../../../chain_ids.ts';
+import { ChainErrorKinds } from '../../../errors.ts';
 import { TransactionStatusTypes } from '../../../transaction_status.ts';
-import { TonMainnet } from '../../ton_chains.ts';
+import { TON_CENTER_MAINNET_URL, TONAPI_MAINNET_URL, TonMainnet } from '../../ton_chains.ts';
 import type { TonEmulationResult } from '../../ton_chain.ts';
 import { tonRelayMessage } from '../../ton_messages.ts';
-import type { TonTransactionStatus } from '../../ton_transaction_status.ts';
+import type { TonProvider, TonTrace, TonTraceTransaction } from '../../ton_provider.ts';
+import { ToncenterProvider } from '../../ton_toncenter.ts';
+import { TonapiProvider } from '../../ton_tonapi.ts';
+import { type TonTransactionStatus, summarizeTonTrace } from '../../ton_transaction_status.ts';
 import { TonWallet } from '../../ton_wallet.ts';
 import { FetchRecorder, type RecordedScenario, type Recordings, writeRecordings } from '../ton_recordings.ts';
 
@@ -48,6 +53,7 @@ const env = {
 
 const missing = [
   ['TONCENTER_API_KEY', process.env.TONCENTER_API_KEY],
+  ['TONAPI_API_KEY', process.env.TONAPI_API_KEY],
   ['TON_LIVE_MNEMONIC', env.mnemonic],
 ].flatMap(([name, value]) => (value === undefined || value === '' ? [name] : []));
 if (missing.length > 0) {
@@ -55,6 +61,10 @@ if (missing.length > 0) {
 }
 
 const chain = TonMainnet;
+// Each provider on its own, to check them against each other.
+const toncenter = new ToncenterProvider({ url: TON_CENTER_MAINNET_URL, apiKey: process.env.TONCENTER_API_KEY ?? '' });
+const tonapi = new TonapiProvider({ url: TONAPI_MAINNET_URL, apiKey: process.env.TONAPI_API_KEY ?? '' });
+const providers: TonProvider[] = [toncenter, tonapi];
 const walletAt = (account: number): TonWallet =>
   TonWallet.fromMnemonic(env.mnemonic, { derivationPath: TonWallet.derivationPath({ account }) });
 const feePayer = walletAt(env.feePayerAccount);
@@ -70,9 +80,15 @@ async function freshVault(after: number): Promise<{ wallet: TonWallet; account: 
   throw new Error(`no unused vault index within 50 of ${after}`);
 }
 
+interface SentRequest {
+  boc: string;
+  hash: string;
+  seqno: number;
+  validUntil: number;
+}
+
 /** The fee payer's external request relaying `vault`'s request to send everything it holds back. */
-async function relayBoc(vault: TonWallet, deploy: boolean): Promise<{ boc: string; hash: string }> {
-  const validUntil = Math.floor(Date.now() / 1000) + VALID_FOR_SECONDS;
+async function relayBoc(vault: TonWallet, deploy: boolean, validUntil = Math.floor(Date.now() / 1000) + VALID_FOR_SECONDS): Promise<SentRequest> {
   const request = vault.createInternalRequest({
     seqno: 0,
     validUntil,
@@ -86,6 +102,26 @@ async function relayBoc(vault: TonWallet, deploy: boolean): Promise<{ boc: strin
     deploy: state.status !== 'active',
     messages: [tonRelayMessage({ wallet: vault, request, value: ATTACHED, deploy })],
   });
+}
+
+/** A trace without what legitimately differs between providers: the masterchain block and body cell identity. */
+function comparable(trace: TonTrace): unknown {
+  return trace.transactions.map(({ mcSeqno: _mc, inMsg, outMsgs, ...rest }: TonTraceTransaction) => ({
+    ...rest,
+    inMsg: inMsg === null ? null : { ...inMsg, body: inMsg.body?.hash().toString('hex') ?? null },
+    outMsgs: outMsgs.map((m) => ({ ...m, body: m.body?.hash().toString('hex') ?? null })),
+  }));
+}
+
+/** The provider's trace of `hash` once it is complete; TonAPI can trail TON Center. */
+async function completeTrace(provider: TonProvider, hash: string): Promise<TonTrace> {
+  const deadline = Date.now() + STATUS_TIMEOUT_MS;
+  for (;;) {
+    const trace = await provider.getTrace(hash);
+    if (trace?.complete === true) return trace;
+    if (Date.now() > deadline) throw new Error(`${provider.name}: no complete trace of ${hash} after ${STATUS_TIMEOUT_MS / 1000}s`);
+    await new Promise((resolve) => setTimeout(resolve, STATUS_POLL_MS));
+  }
 }
 
 async function emulateRecorded(name: string, description: string, boc: string): Promise<TonEmulationResult> {
@@ -129,6 +165,7 @@ async function finalStatusRecorded(name: string, description: string, hash: stri
 
 describe('TON mainnet (live)', () => {
   let startBalance: bigint;
+  let sent: SentRequest | null = null;
 
   beforeAll(async () => {
     recorder.install();
@@ -157,6 +194,33 @@ describe('TON mainnet (live)', () => {
     expect(await chain.getSeqno(feePayer.address)).toBeGreaterThanOrEqual(0);
   });
 
+  it.each(providers.map((p) => [p.name, p] as const))("reads the masterchain head's seqno and time from %s", async (_name, provider) => {
+    const head = await provider.getMasterchainHead();
+    expect(head.seqno).toBeGreaterThan(0);
+    expect(Math.abs(head.utime - Date.now() / 1000)).toBeLessThan(120);
+  });
+
+  it('emulates a relay the same on both providers', async () => {
+    const { wallet: vault } = await freshVault(env.feePayerAccount);
+    const { boc } = await relayBoc(vault, true);
+    const [fromToncenter, fromTonapi] = await Promise.all(providers.map((p) => p.emulate(boc)));
+    const judged = (trace: TonTrace): unknown => {
+      const summary = summarizeTonTrace(CHAIN_ID_TON_MAINNET, trace);
+      return { success: summary.success, deliveries: summary.deliveries.map((d) => d.outcome) };
+    };
+    expect(judged(fromTonapi)).toEqual(judged(fromToncenter));
+    expect(fromTonapi.transactions.map((tx) => tx.account)).toEqual(fromToncenter.transactions.map((tx) => tx.account));
+  });
+
+  it('calls a request that was never sent expired once the chain is past its validUntil', async () => {
+    const head = await toncenter.getMasterchainHead();
+    const { wallet: vault } = await freshVault(env.feePayerAccount);
+    const stale = await relayBoc(vault, true, head.utime - 120);
+    await expect(chain.isRequestExpired({ wallet: feePayer.address, ...stale })).resolves.toBe(true);
+    const fresh = await relayBoc(vault, true);
+    await expect(chain.isRequestExpired({ wallet: feePayer.address, ...fresh })).resolves.toBe(false);
+  });
+
   it('emulates a relay that deploys a fresh vault (AC3)', async () => {
     const { wallet: vault } = await freshVault(env.feePayerAccount);
     const { boc } = await relayBoc(vault, true);
@@ -176,17 +240,54 @@ describe('TON mainnet (live)', () => {
 
   (env.send ? it : it.skip)('sends the deploy relay and reads it final (AC4)', async () => {
     const { wallet: vault } = await freshVault(env.feePayerAccount);
-    const { boc } = await relayBoc(vault, true);
+    const request = await relayBoc(vault, true);
+    const { boc } = request;
     const emulated = await chain.emulate(boc);
     expect(emulated.success).toBe(true);
     expect(emulated.fees).toBeLessThan(env.maxSpend);
     const hash = await chain.broadcast(boc);
+    expect(hash).toBe(request.hash);
+    sent = request;
     console.log(`sent ${hash}`);
     const status = await finalStatusRecorded('relay_deploy_sent', 'the deploy relay, sent and final', hash);
     expect(status.status).toBe(TransactionStatusTypes.Success);
     expect((await chain.getAccountState(vault.address)).status).toBe('active');
     expect(await chain.getSeqno(vault.address)).toBe(1);
     expect(status.fees).toBeLessThan(env.maxSpend);
+  });
+
+  (env.send ? it : it.skip)('reads the sent trace the same from both providers', async () => {
+    if (sent === null) throw new Error('the deploy relay was not sent');
+    const hash = sent.hash;
+    const [fromToncenter, fromTonapi] = await Promise.all(providers.map((p) => completeTrace(p, hash)));
+    expect(comparable(fromTonapi)).toEqual(comparable(fromToncenter));
+  });
+
+  (env.send ? it : it.skip)('never calls a request that landed expired', async () => {
+    if (sent === null) throw new Error('the deploy relay was not sent');
+    await expect(chain.isRequestExpired({ wallet: feePayer.address, ...sent })).resolves.toBe(false);
+  });
+
+  // A provider answers a resend of a landed message with a refusal, or accepts
+  // it (a duplicate, or a lite server behind the message); either way the
+  // wallet's seqno keeps it from landing again.
+  (env.send ? it : it.skip)('answers a resent message definitely on both providers, and does not land it twice', async () => {
+    if (sent === null) throw new Error('the deploy relay was not sent');
+    const seqno = await chain.getSeqno(feePayer.address);
+    expect(seqno).toBe(sent.seqno + 1);
+    for (const provider of providers) {
+      // A retryable reply is an outage, not an answer; ask again.
+      let err: unknown = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        err = await provider.sendBoc(sent.boc).then(() => null, (e: unknown) => e);
+        console.log(`${provider.name} on a resend: ${(err as Error | null)?.message ?? 'accepted'}`);
+        if (!(err as { retryable?: boolean } | null)?.retryable) break;
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+      }
+      if (err !== null) expect(err).toMatchObject({ kind: ChainErrorKinds.BroadcastRejected, retryable: false });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 15_000));
+    expect(await chain.getSeqno(feePayer.address)).toBe(seqno);
   });
 
   (env.send ? it : it.skip)('sends a relay without deploy and reads it Failed', async () => {

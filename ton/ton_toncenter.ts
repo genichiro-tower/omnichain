@@ -18,6 +18,7 @@ import {
   asRecord,
   definiteError,
   errorMessageOf,
+  tonBroadcastReply,
   tonHttpJson,
 } from './ton_provider.ts';
 
@@ -72,7 +73,10 @@ export class ToncenterProvider implements TonProvider {
   }
 
   async sendBoc(boc: string): Promise<void> {
-    const reply = await tonHttpJson(NAME, this.endpoint, '/api/v3/message', { method: 'POST', body: { boc }, headers: this.headers() });
+    const reply = await tonBroadcastReply(
+      NAME,
+      tonHttpJson(NAME, this.endpoint, '/api/v3/message', { method: 'POST', body: { boc }, headers: this.headers() }),
+    );
     const error = errorMessageOf(reply);
     if (error !== null) throw definiteError(ChainErrorKinds.BroadcastRejected, `${NAME} refused the message: ${error}`);
   }
@@ -189,7 +193,9 @@ function toTransaction(tx: Record<string, unknown>, parent: string | null): TonT
 
 function toMessage(msg: Record<string, unknown>): TonTraceMessage {
   const content = msg.message_content === null || msg.message_content === undefined ? null : asRecord(msg.message_content, 'message_content');
-  const body = content !== null && typeof content.body === 'string' ? Cell.fromBase64(content.body) : null;
+  const cell = content !== null && typeof content.body === 'string' ? Cell.fromBase64(content.body) : null;
+  // An empty body is no body, as TonAPI's decoded messages read it.
+  const body = cell === null || (cell.bits.length === 0 && cell.refs.length === 0) ? null : cell;
   return {
     source: typeof msg.source === 'string' ? tonRawAddress(msg.source) : null,
     destination: typeof msg.destination === 'string' ? tonRawAddress(msg.destination) : null,
