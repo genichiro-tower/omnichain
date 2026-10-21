@@ -185,6 +185,7 @@ function toMessage(msg: Record<string, unknown>): TonTraceMessage {
     bounce: msg.bounce === true,
     bounced: msg.bounced === true,
     opcode: typeof msg.opcode === 'string' ? Number(BigInt(msg.opcode)) >>> 0 : null,
+    createdLt: msg.created_lt === null || msg.created_lt === undefined ? null : asBigInt(msg.created_lt, 'created_lt'),
     body,
   };
 }

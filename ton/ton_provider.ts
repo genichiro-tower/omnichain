@@ -23,6 +23,12 @@ export interface TonTraceMessage {
   bounced: boolean;
   /** The body's first 32 bits, when it has them. */
   opcode: number | null;
+  /**
+   * The sender's logical time when it created the message; `null` for an
+   * external-in message. Unique per sender, so (source, createdLt) names one
+   * message across the trace.
+   */
+  createdLt: bigint | null;
   body: Cell | null;
 }
 
@@ -248,6 +254,7 @@ export function tonTraceMessageOf(message: Message): TonTraceMessage {
     bounce: info.type === 'internal' && info.bounce,
     bounced: info.type === 'internal' && info.bounced,
     opcode: body !== null && body.bits.length >= 32 ? body.beginParse().loadUint(32) : null,
+    createdLt: info.type === 'external-in' ? null : info.createdLt,
     body,
   };
 }

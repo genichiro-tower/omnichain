@@ -8,7 +8,7 @@ import { ChainErrorKinds } from '../../errors.ts';
 import { TransactionStatusTypes } from '../../transaction_status.ts';
 import { TonChain } from '../ton_chain.ts';
 import { TON_JETTON_INTERNAL_TRANSFER_OP, TON_JETTON_TRANSFER_OP, TON_W5_SIGNED_INTERNAL_OP } from '../ton_messages.ts';
-import type { TonAccountState, TonProvider, TonTrace, TonTraceTransaction } from '../ton_provider.ts';
+import type { TonAccountState, TonProvider, TonTrace, TonTraceMessage, TonTraceTransaction } from '../ton_provider.ts';
 import { ToncenterProvider } from '../ton_toncenter.ts';
 import { TonTransactionStatus, summarizeTonTrace } from '../ton_transaction_status.ts';
 import { TonUnsignedTransaction } from '../ton_transactions.ts';
@@ -222,6 +222,72 @@ describe('TonTransactionStatus', () => {
     const excessSkipped = judge({ ...receiverJettonWallet, success: false, aborted: false, skippedActions: 1 });
     expect(excessSkipped.status).toBe(TransactionStatusTypes.Success);
     expect(excessSkipped.summary?.failedTransactions).toHaveLength(1);
+  });
+
+  it('tells two identical jetton transfers apart by created_lt', async () => {
+    const trace = await realTrace();
+    const [root, child] = trace.transactions;
+    const vault = root.account;
+    const vaultJettonWallet = child.account;
+    // Two transfers from the vault to its own jetton wallet with the same attached TON.
+    const transfer = (lt: bigint): TonTraceMessage => ({
+      ...root.outMsgs[0],
+      source: vault,
+      destination: vaultJettonWallet,
+      value: 50_000_000n,
+      bounce: true,
+      opcode: TON_JETTON_TRANSFER_OP,
+      createdLt: lt,
+    });
+    const internalTransfer = (lt: bigint, to: string): TonTraceMessage => ({
+      ...transfer(lt),
+      source: vaultJettonWallet,
+      destination: to,
+      value: 40_000_000n,
+      opcode: TON_JETTON_INTERNAL_TRANSFER_OP,
+    });
+    const tx = (hash: string, parent: string, account: string, inMsg: TonTraceMessage, outMsgs: TonTraceMessage[] = []): TonTraceTransaction => ({
+      ...child,
+      hash: hash.repeat(32),
+      parent,
+      account,
+      inMsg,
+      outMsgs,
+      success: true,
+      aborted: false,
+    });
+    const first = tx('a1', root.hash, vaultJettonWallet, transfer(10n), [internalTransfer(11n, OTHER)]);
+    const second = tx('a2', root.hash, vaultJettonWallet, transfer(20n), [internalTransfer(21n, JETTON_WALLET)]);
+    const firstLanded = tx('b1', first.hash, OTHER, internalTransfer(11n, OTHER));
+    const secondRefunded = { ...tx('b2', second.hash, JETTON_WALLET, internalTransfer(21n, JETTON_WALLET)), success: false, aborted: true };
+    const status = TonTransactionStatus.fromTrace({
+      chainId: CHAIN_ID_TON_MAINNET,
+      // The receivers are listed in the opposite order to the messages, as a provider may return them.
+      trace: {
+        complete: true,
+        transactions: [{ ...root, outMsgs: [transfer(20n), transfer(10n)] }, second, first, secondRefunded, firstLanded],
+      },
+      masterchainTip: 100472540,
+    });
+    expect(status.status).toBe(TransactionStatusTypes.Failed);
+    expect(status.error?.code).toBe('jetton_bounced');
+    expect(status.summary?.deliveries).toEqual([
+      expect.objectContaining({ outcome: 'delivered', transaction: firstLanded.hash }),
+      expect.objectContaining({ outcome: 'bounced', transaction: secondRefunded.hash }),
+    ]);
+  });
+
+  it('refuses a trace whose receiver disagrees with the message it matched', async () => {
+    const trace = await realTrace();
+    const [root, child] = trace.transactions;
+    const tampered = { ...child, inMsg: { ...(child.inMsg as TonTraceMessage), value: 1n } };
+    expect(() =>
+      TonTransactionStatus.fromTrace({
+        chainId: CHAIN_ID_TON_MAINNET,
+        trace: { complete: true, transactions: [root, tampered] },
+        masterchainTip: 100472540,
+      }),
+    ).toThrow(/Inconsistent TON trace/);
   });
 
   it('is Failed when a wallet skipped a message it could not send', async () => {

@@ -1,5 +1,7 @@
 import type { Cell } from '@ton/core';
 
+import { ChainError, ChainErrorKinds } from '../errors.ts';
+
 import {
   AssetBalanceChange,
   type NestedBalanceChanges,
@@ -144,11 +146,14 @@ function judgeRequest(trace: TonTrace): { problem: TonRequestProblem | null; del
       );
     }
     // A bounce the wallet sends back is not a message it was asked to send.
-    const sent = wallet.outMsgs.filter((m) => m.destination !== null && !m.bounced);
+    // Sorted by creation, the order the request listed them.
+    const sent = wallet.outMsgs
+      .filter((m) => m.destination !== null && !m.bounced)
+      .sort((a, b) => (a.createdLt === b.createdLt ? 0 : (a.createdLt ?? 0n) < (b.createdLt ?? 0n) ? -1 : 1));
     if (wallet !== root && wallet.success && sent.length === 0) {
       note({ code: 'request_not_executed', reason: `${wallet.account} did not execute the relayed request (bad signature or seqno)` });
     }
-    const received = [...(children.get(wallet.hash) ?? [])];
+    const received = children.get(wallet.hash) ?? [];
     for (const message of sent) {
       const { receiver, outcome: firstHop } = deliveryOf(message, received, trace.complete);
       // A jetton transfer moves the jettons one hop later, in the receiver's jetton wallet.
@@ -175,15 +180,31 @@ function judgeRequest(trace: TonTrace): { problem: TonRequestProblem | null; del
   return { problem, deliveries };
 }
 
-/** Which received transaction took `message`, and whether it kept the value. */
+/**
+ * Which received transaction took `message`, and whether it kept the value.
+ *
+ * Matched on (source, createdLt), which names one message; destination and
+ * value must then agree, or the trace is inconsistent and nothing is judged
+ * from it.
+ */
 function deliveryOf(
   message: TonTraceMessage,
-  received: TonTraceTransaction[],
+  received: readonly TonTraceTransaction[],
   complete: boolean,
 ): { receiver: TonTraceTransaction | null; outcome: TonDeliveryOutcome } {
-  const index = received.findIndex((tx) => tx.account === message.destination && tx.inMsg?.value === message.value);
-  const receiver = index === -1 ? null : received.splice(index, 1)[0];
+  if (message.createdLt === null || message.source === null) {
+    throw inconsistentTrace(`a sent message to ${message.destination} has no source or created_lt`);
+  }
+  const receiver =
+    received.find((tx) => tx.inMsg !== null && tx.inMsg.source === message.source && tx.inMsg.createdLt === message.createdLt) ??
+    null;
   if (receiver === null) return { receiver, outcome: complete ? 'undelivered' : 'pending' };
+  if (receiver.account !== message.destination || receiver.inMsg?.value !== message.value) {
+    throw inconsistentTrace(
+      `message ${message.source}@${message.createdLt} was sent to ${message.destination} with ${message.value} ` +
+        `but received by ${receiver.account} with ${receiver.inMsg?.value}`,
+    );
+  }
   // TON bounces a bounceable message only when its receiver's transaction
   // aborted — a failed compute or action phase, or no code yet. A receiver that
   // merely skipped one of its own sends (e.g. an excess refund under "ignore
@@ -195,12 +216,16 @@ function deliveryOf(
 /** The `internal_transfer` the sender's jetton wallet sent on, judged where the jettons land. */
 function jettonDeliveryOf(
   senderJettonWallet: TonTraceTransaction,
-  received: TonTraceTransaction[],
+  received: readonly TonTraceTransaction[],
   complete: boolean,
 ): { receiver: TonTraceTransaction | null; outcome: TonDeliveryOutcome } {
   const transfer = senderJettonWallet.outMsgs.find((m) => m.opcode === TON_JETTON_INTERNAL_TRANSFER_OP && !m.bounced);
   if (transfer === undefined) return { receiver: null, outcome: complete ? 'undelivered' : 'pending' };
-  return deliveryOf(transfer, [...received], complete);
+  return deliveryOf(transfer, received, complete);
+}
+
+function inconsistentTrace(detail: string): ChainError {
+  return new ChainError(ChainErrorKinds.RpcError, `Inconsistent TON trace from the provider: ${detail}`);
 }
 
 function childrenByParent(transactions: readonly TonTraceTransaction[]): Map<string, TonTraceTransaction[]> {
