@@ -94,6 +94,11 @@ The relay message is bounceable: a request that fails in the target returns the 
 | Finality | per transaction `mc_block_seqno` (+ `finality: finalized`) | serves committed blocks only |
 | `masterchainSeqno` | the masterchain block that committed the shard block | the shard block's `master_ref`, which can be a few blocks earlier |
 
+## Testing
+
+- `npm test` runs the unit specs (`ton/test/*.spec.ts`, no network) and `ton_recorded.spec.ts`, which replays real mainnet replies from `ton/test/fixtures/mainnet_recordings.json` through the providers' parsing and checks the SDK reaches the verdicts it reached live.
+- `npm run test:live:ton` runs `ton/test/live/ton_mainnet.live.ts` against mainnet. It reads `.env.ton.local` (git-ignored; template `.env.ton.example`): the provider keys, a **dedicated** test mnemonic, the fee payer's account index and a spend cap. It reads and emulates by default — a relay that deploys a fresh vault, and the same relay without deploy — broadcasts both only with `TON_LIVE_SEND=1`, and rewrites the recordings only with `TON_LIVE_RECORD=1`. The vault returns everything to the fee payer, so a run costs only fees. Recordings keep URLs, bodies and replies, never headers, so no key is written.
+
 ## Not covered
 
 Testnet, wallet versions other than W5R1, W5 extensions, TON-native mnemonics, jetton metadata (jetton transfers take `amount` in the smallest unit), and jetton balance changes beyond `jettonCredits`.
