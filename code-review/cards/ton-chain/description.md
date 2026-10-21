@@ -238,9 +238,32 @@ afterwards whether it did.
 
 # Implementation Plan
 
+1. `TonAddress` forms and the `@ton/*` dependencies (R1, R3).
+2. Messages, relay messages and the normalized external hash (R5).
+3. TON Center v3 and TonAPI providers with the fallback (R2, R6–R8).
+4. `TonChain`, `TonWallet`, emulation and transaction status (R2, R4, R6–R8).
+5. Docs, CHANGELOG and version 0.7.0 (R9).
+
 ---
 
 # Verification
+
+- Typecheck and the ESM and CJS builds are clean.
+- Real replies recorded from both providers; one test checks they normalize
+  the same trace identically.
+- The SLIP-0010 derivation matches the spec vectors; the normalized external
+  hash matches TON Center's `hash_norm` on a real message.
+- `code-review/code_reviewer.py`: 5 rounds, round 5 has no Critical; round 6
+  after the matching change and the test setup.
+- AC3 and AC4 on mainnet (`npm run test:live:ton`, 2026-10-21, fee payer
+  `UQBCC5glBygg10SwcXZdY4Ssd6NgCNcm0qZLrQaVw4sPsQfx`):
+  - a relay deploying a fresh vault emulated and sent (`f090af72…`): Success,
+    vault active at seqno 1; fees 0.0021 TON;
+  - the same relay without deploy emulated and sent (`43311663…`): Failed,
+    `bounced`, value back to the fee payer;
+  - the run spent 0.0029 TON; the replies are recorded and replayed under
+    `npm test`.
+- 1825 tests pass (67 for TON).
 
 <!-- ====================== PART C - DEVIATIONS ====================== -->
 
@@ -248,6 +271,54 @@ afterwards whether it did.
 
 # Deviations from the plan
 
+PR: `getomnichain/omnichain#17` (`genichiro-tower:feature/ton-chain` →
+`main`), opened from a fork: `genichiro-tower` has read access only.
+
+- **R4:** `fromMnemonic(m, { derivationPath })` with
+  `TonWallet.derivationPath({ account })`, as Tron and Stellar do, not
+  `{ index }`; `stateInit` is a getter and verification is
+  `verifySignature`.
+- **R5:** the relay is `tonRelayMessage({ wallet, request, value, deploy })`.
+- **R8:** the status judges the request on the wallets that sent it and the
+  first hop of each message they sent (a jetton transfer at the receiver's
+  jetton wallet), with `summary.deliveries` per message; failures further
+  down do not fail it. Codes: `skipped_actions`, `request_not_executed`,
+  `bounced`, `undelivered`, `jetton_bounced`, `jetton_undelivered`.
+- **R8, matching:** each message a sending wallet sent is matched to the
+  transaction that received it by (source, `created_lt`), which names one
+  message; destination and value must then agree, or the status throws an
+  inconsistent-trace `RpcError`. Matching by destination and value paired
+  identical messages arbitrarily (a vault's jetton transfers all go to its
+  own jetton wallet with the same attached TON). `summary.deliveries` is
+  ordered as each wallet sent its messages, the request's order.
+- **R6/R8:** TonAPI's `master_ref` can be a few masterchain blocks before
+  TON Center's committing block; finality is the same.
+- **Testing (not in Part A):** three tiers.
+  - Unit specs (`ton/test/*.spec.ts`), no network. The delivery judgment is
+    in `ton_status.spec.ts`.
+  - `ton_recorded.spec.ts` replays real mainnet replies
+    (`fixtures/mainnet_recordings.json`) through the providers' parsing under
+    `npm test`.
+  - `npm run test:live:ton` (`ton/test/live/ton_mainnet.live.ts`,
+    `jest.live.config.mjs`, never part of `npm test`) runs AC3 and AC4 on
+    mainnet. It reads, and emulates by default; `TON_LIVE_SEND=1` broadcasts
+    and `TON_LIVE_RECORD=1` rewrites the recordings. The vault returns
+    everything to the fee payer, so a run costs only fees, under
+    `TON_LIVE_MAX_SPEND_NANO`.
+  - Secrets: the provider keys and a **dedicated** test mnemonic live in the
+    git-ignored `.env.ton.local` (template `.env.ton.example`), parsed into
+    Jest's own `process.env`. Recordings keep URLs, bodies and replies, never
+    headers.
+  - AC6 (a refunded jetton transfer) is covered by hand-built traces only;
+    recording one needs jettons on the fee payer.
+- The root entry exports only `TonAddress`; the family is `./ton`.
+
 ---
 
 # Follow-ups raised
+
+The review's remaining Medium items (PR #17, "Known open items"): broadcast
+fallback after a landed message, `isRequestExpired` clock and lag, `{ index }`,
+aborted-without-bounce, 404 / failed get-method read as 0, `jettonCredits` /
+`failedTransactions` predicates, emulation `ignoreSignature` and sender fees,
+native bounce flag, pinned `@ton/*`, the fallback log line.
