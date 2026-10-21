@@ -37,7 +37,7 @@ mounted at each service's own `chain` directory.
 | **Solana** (mainnet, devnet, testnet) | [solana/](../solana) | `SolanaChain` over `@solana/web3.js` v1 + SPL Token / Token-2022 — see [solana.md](./solana.md) |
 | **Stellar** (mainnet, testnet) | [stellar/](../stellar) | `StellarChain` over `@stellar/stellar-sdk` (Horizon + Soroban RPC); import from `@getomnichain/omnichain/stellar` — see [stellar.md](./stellar.md) |
 | **Tron** (mainnet, Shasta) | [tron/](../tron) | `TronChain` over the TronGrid HTTP API (tronpy port); import from `@getomnichain/omnichain/tron` — see [tron.md](./tron.md) |
-| **TON** | [ton/](../ton) | `TonAddress` only (no full chain yet) |
+| **TON** (mainnet) | [ton/](../ton) | `TonChain` over TON Center v3 with TonAPI as fallback, W5R1 wallets and relayed requests; import from `@getomnichain/omnichain/ton` — see [ton.md](./ton.md) |
 
 ## Quickstart
 
@@ -281,3 +281,4 @@ Add `Foo` enum value to [network_type.ts](../network_type.ts), create
 - [solana.md](./solana.md) — Solana, SPL Token, Token-2022, priority-fee model
 - [stellar.md](./stellar.md) — Stellar classic + Soroban, trustlines, SEP-5/SEP-53 wallet
 - [tron.md](./tron.md) — Tron TRX + TRC-20, energy fees, approvals, canonical transactions
+- [ton.md](./ton.md) — TON and jettons, W5R1 wallets, relayed requests, trace emulation and status

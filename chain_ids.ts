@@ -115,8 +115,8 @@ export function isStellar(chainId: number): boolean {
 }
 
 // -----------------------------------------------------------------------------
-// TON family (mirrors chain_ids.py:92-100) — not implemented on TS v0
-// (only TonAddress is exported; TonChain deferred).
+// TON family (mirrors chain_ids.py:92-100). TonChain serves mainnet only
+// (`@getomnichain/omnichain/ton`).
 // -----------------------------------------------------------------------------
 
 export const CHAIN_ID_TON_MAINNET = -4000;

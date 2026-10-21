@@ -8,6 +8,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-10-21
+
+TON: a chain, W5 wallets, and requests one wallet signs and another delivers and pays for. Mainnet only. See `docs/ton.md`.
+
+### Added
+
+- **`TonChain` and `TonMainnet`** (`@getomnichain/omnichain/ton`), read through TON Center v3 with TonAPI as the fallback. A call goes to TonAPI only when TON Center failed without an answer (transport, timeout, 429, 5xx). Every provider needs a key; a missing one is read from `TONCENTER_API_KEY` / `TONAPI_API_KEY`.
+- **`TonWallet`**: W5R1 on workchain 0, its key derived from a BIP-39 mnemonic with SLIP-0010 ed25519 at `m/44'/607'/<account>'`. `createExternalRequest` (sent and paid by the wallet itself) and `createInternalRequest` (signed for a relayer, op `0x73696e74`).
+- **Relaying:** `tonRelayMessage` delivers another wallet's signed request and carries its StateInit while it is undeployed, so the relayer deploys it on first use and pays every fee.
+- **Messages:** `TonOutMessage`, `tonCommentBody`, `tonJettonTransferBody` (TEP-74), `tonNormalizedExternalHash` (TEP-467, the transaction id).
+- **Reads:** account state, seqno, TON and jetton balances, `getJettonWalletAddress`.
+- **`TonChain.emulate`**: the whole trace of an external message, signature ignored — fees, success, failed transactions, bounced messages, TON balance changes and jetton credits.
+- **`TonTransactionStatus`**: final once the trace is complete and every transaction is in a masterchain-referenced block, with no confirmation count; `Failed` when any transaction failed or any message bounced. `isRequestExpired` tells a request that can no longer land.
+
+### Changed
+
+- **`TonAddress.canonical()`** is the raw form with a lowercase hash, so every form of one account compares equal (it returned the input before). It also converts to either user-friendly form and reports the input's flags.
+- **The root entry exports only `TonAddress`** from the TON family, so it loads no `@ton/*` dependency.
+
+### Dependencies
+
+- `@ton/core` ^0.63, `@ton/crypto` ^3.3, `@ton/ton` ^16.3.
+
 ## [0.6.3] — 2026-10-05
 
 Tron: a transaction status rango-intents can trust, and local signing for depositron (RIN-317). No new node calls; building a transaction makes one fewer.
