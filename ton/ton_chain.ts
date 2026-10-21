@@ -14,6 +14,7 @@ import { TonAsset } from './ton_asset.ts';
 import { tonCommentBody, tonJettonTransferBody } from './ton_messages.ts';
 import {
   type TonAccountState,
+  TonBroadcastUncertainError,
   TonFallbackProvider,
   type TonHttpEndpoint,
   type TonProvider,
@@ -29,6 +30,12 @@ import { TonSignedTransaction, TonUnsignedTransaction, tonExternalBocHash } from
 export const DEFAULT_JETTON_TRANSFER_ATTACHED_NANOTON = 50_000_000n;
 /** TON forwarded to the jetton recipient with the transfer notification. */
 export const DEFAULT_JETTON_FORWARD_NANOTON = 1n;
+/**
+ * How far past a request's `validUntil` the masterchain must be before the
+ * request counts as expired; shard blocks and the provider's state can trail
+ * the masterchain head by a few seconds.
+ */
+export const REQUEST_EXPIRY_MARGIN_SECONDS = 60;
 
 export interface TonProviderEndpoint {
   url: string;
@@ -219,7 +226,11 @@ export class TonChain extends Chain {
     return { trace, ...summarizeTonTrace(this.chainId, trace) };
   }
 
-  /** Sends an external message (base64 BOC or bytes) and returns its normalized hash. */
+  /**
+   * Sends an external message (base64 BOC or bytes) and returns its normalized
+   * hash. Throws `TonBroadcastUncertainError` when the message may have reached
+   * the network anyway; re-signing then can pay twice.
+   */
   async broadcast(signed: string | Uint8Array, opts?: BroadcastOpts): Promise<string> {
     if (opts?.signal !== undefined) {
       throw new ChainError(ChainErrorKinds.FeatureNotSupported, 'TON broadcast does not take a signal', { chainId: this.chainId });
@@ -229,6 +240,9 @@ export class TonChain extends Chain {
     try {
       await this.provider.sendBoc(boc);
     } catch (err) {
+      if (err instanceof TonBroadcastUncertainError) {
+        throw new TonBroadcastUncertainError(err.message, { chainId: this.chainId, txHash: hash }, err);
+      }
       if (err instanceof TonProviderError) {
         throw new ChainError(err.kind, err.message, { chainId: this.chainId, txHash: hash }, err);
       }
@@ -259,18 +273,21 @@ export class TonChain extends Chain {
   }
 
   /** The masterchain's latest block. */
-  getChainTipHeight(): Promise<number> {
-    return this.provider.getMasterchainSeqno();
+  async getChainTipHeight(): Promise<number> {
+    return (await this.provider.getMasterchainHead()).seqno;
   }
 
   /**
-   * Whether a request signed with `seqno` and `validUntil` can no longer land:
-   * its validity has passed and the wallet's seqno never moved past it.
+   * Whether the request `hash`, signed with `seqno` and `validUntil`, can no
+   * longer land, so signing a replacement cannot pay twice: the chain's own
+   * time (not this machine's) is past `validUntil` by a margin, the wallet's
+   * seqno never moved past the request's, and no trace of it exists.
    */
-  async isRequestExpired(args: { wallet: string; seqno: number; validUntil: number; now?: number }): Promise<boolean> {
-    const now = args.now ?? Math.floor(Date.now() / 1000);
-    if (now <= args.validUntil) return false;
-    return (await this.getSeqno(args.wallet)) <= args.seqno;
+  async isRequestExpired(args: { wallet: string; seqno: number; validUntil: number; hash: string }): Promise<boolean> {
+    const head = await this.provider.getMasterchainHead();
+    if (head.utime <= args.validUntil + REQUEST_EXPIRY_MARGIN_SECONDS) return false;
+    if ((await this.getSeqno(args.wallet)) > args.seqno) return false;
+    return (await this.provider.getTrace(args.hash)) === null;
   }
 
   /** TON addresses do not reveal their key, so a signature cannot be checked against one. */
@@ -289,7 +306,7 @@ export class TonChain extends Chain {
       });
     }
     const trace = await this.provider.getTrace(hash);
-    const masterchainTip = trace === null ? 0 : await this.provider.getMasterchainSeqno();
+    const masterchainTip = trace === null ? 0 : (await this.provider.getMasterchainHead()).seqno;
     return TonTransactionStatus.fromTrace({
       chainId: this.chainId,
       trace,

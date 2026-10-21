@@ -1,6 +1,5 @@
 import type { Cell } from '@ton/core';
 
-import { ChainError, ChainErrorKinds } from '../errors.ts';
 
 import {
   AssetBalanceChange,
@@ -183,28 +182,19 @@ function judgeRequest(trace: TonTrace): { problem: TonRequestProblem | null; del
 /**
  * Which received transaction took `message`, and whether it kept the value.
  *
- * Matched on (source, createdLt), which names one message; destination and
- * value must then agree, or the trace is inconsistent and nothing is judged
- * from it.
+ * Matched on (source, createdLt), which names one message. The providers
+ * refuse a trace whose receivers disagree with their senders, so a match is
+ * the message itself.
  */
 function deliveryOf(
   message: TonTraceMessage,
   received: readonly TonTraceTransaction[],
   complete: boolean,
 ): { receiver: TonTraceTransaction | null; outcome: TonDeliveryOutcome } {
-  if (message.createdLt === null || message.source === null) {
-    throw inconsistentTrace(`a sent message to ${message.destination} has no source or created_lt`);
-  }
   const receiver =
     received.find((tx) => tx.inMsg !== null && tx.inMsg.source === message.source && tx.inMsg.createdLt === message.createdLt) ??
     null;
   if (receiver === null) return { receiver, outcome: complete ? 'undelivered' : 'pending' };
-  if (receiver.account !== message.destination || receiver.inMsg?.value !== message.value) {
-    throw inconsistentTrace(
-      `message ${message.source}@${message.createdLt} was sent to ${message.destination} with ${message.value} ` +
-        `but received by ${receiver.account} with ${receiver.inMsg?.value}`,
-    );
-  }
   // TON bounces a bounceable message only when its receiver's transaction
   // aborted — a failed compute or action phase, or no code yet. A receiver that
   // merely skipped one of its own sends (e.g. an excess refund under "ignore
@@ -222,10 +212,6 @@ function jettonDeliveryOf(
   const transfer = senderJettonWallet.outMsgs.find((m) => m.opcode === TON_JETTON_INTERNAL_TRANSFER_OP && !m.bounced);
   if (transfer === undefined) return { receiver: null, outcome: complete ? 'undelivered' : 'pending' };
   return deliveryOf(transfer, received, complete);
-}
-
-function inconsistentTrace(detail: string): ChainError {
-  return new ChainError(ChainErrorKinds.RpcError, `Inconsistent TON trace from the provider: ${detail}`);
 }
 
 function childrenByParent(transactions: readonly TonTraceTransaction[]): Map<string, TonTraceTransaction[]> {

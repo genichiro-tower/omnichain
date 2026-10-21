@@ -90,7 +90,13 @@ export interface TonProvider {
   getTrace(hash: string): Promise<TonTrace | null>;
   /** Emulates the whole trace of an external message, ignoring its signature. */
   emulate(boc: string): Promise<TonTrace>;
-  getMasterchainSeqno(): Promise<number>;
+  /** The latest masterchain block the provider has applied: its seqno and generation time (unix seconds). */
+  getMasterchainHead(): Promise<TonMasterchainHead>;
+}
+
+export interface TonMasterchainHead {
+  seqno: number;
+  utime: number;
 }
 
 /**
@@ -105,6 +111,19 @@ export class TonProviderError extends ChainError {
     super(kind, message, meta, cause);
     this.name = 'TonProviderError';
     this.retryable = retryable;
+  }
+}
+
+/**
+ * A broadcast whose outcome is unknown: a provider failed without an answer,
+ * so the message may have reached the network even if another provider then
+ * refused it (a refusal can mean it was already accepted). Read the status of
+ * `meta.txHash`, or wait until the request is expired, before signing again.
+ */
+export class TonBroadcastUncertainError extends TonProviderError {
+  constructor(message: string, meta?: ChainErrorMeta, cause?: Error) {
+    super(ChainErrorKinds.RpcError, message, false, meta, cause);
+    this.name = 'TonBroadcastUncertainError';
   }
 }
 
@@ -142,8 +161,29 @@ export class TonFallbackProvider implements TonProvider {
     return this.call('getJettonBalance', (p) => p.getJettonBalance(jettonWallet));
   }
 
-  sendBoc(boc: string): Promise<void> {
-    return this.call('sendBoc', (p) => p.sendBoc(boc));
+  /**
+   * A refusal is definite only when no provider failed before it: once one
+   * failed without an answer, the message may already be in flight, and a
+   * later refusal may be the network rejecting a duplicate.
+   */
+  async sendBoc(boc: string): Promise<void> {
+    try {
+      await this.primary.sendBoc(boc);
+      return;
+    } catch (err) {
+      if (!(err instanceof TonProviderError) || !err.retryable) throw err;
+      if (this.fallback === null) throw new TonBroadcastUncertainError(`broadcast outcome unknown: ${err.message}`, undefined, err);
+      this.onFallback('sendBoc', err);
+      try {
+        await this.fallback.sendBoc(boc);
+      } catch (fallbackErr) {
+        throw new TonBroadcastUncertainError(
+          `broadcast outcome unknown: ${err.message}; then ${(fallbackErr as Error).message}`,
+          undefined,
+          fallbackErr as Error,
+        );
+      }
+    }
   }
 
   getTrace(hash: string): Promise<TonTrace | null> {
@@ -154,8 +194,8 @@ export class TonFallbackProvider implements TonProvider {
     return this.call('emulate', (p) => p.emulate(boc));
   }
 
-  getMasterchainSeqno(): Promise<number> {
-    return this.call('getMasterchainSeqno', (p) => p.getMasterchainSeqno());
+  getMasterchainHead(): Promise<TonMasterchainHead> {
+    return this.call('getMasterchainHead', (p) => p.getMasterchainHead());
   }
 
   private async call<T>(method: string, run: (provider: TonProvider) => Promise<T>): Promise<T> {
@@ -257,6 +297,31 @@ export function tonTraceMessageOf(message: Message): TonTraceMessage {
     createdLt: info.type === 'external-in' ? null : info.createdLt,
     body,
   };
+}
+
+/**
+ * Every internal message sent must carry its source and `created_lt`, and every
+ * transaction that received a message must have received one its parent sent:
+ * same source, `created_lt`, destination and value. A provider whose
+ * trace breaks that is wrong, not the chain, so the error is retryable and
+ * the fallback provider is asked instead.
+ */
+export function assertTraceConsistent(provider: string, trace: TonTrace): TonTrace {
+  const byHash = new Map(trace.transactions.map((tx) => [tx.hash, tx]));
+  const inconsistent = (detail: string): TonProviderError =>
+    new TonProviderError(ChainErrorKinds.RpcError, `${provider} returned an inconsistent trace: ${detail}`, true);
+  for (const tx of trace.transactions) {
+    const unnamed = tx.outMsgs.find((m) => m.destination !== null && (m.source === null || m.createdLt === null));
+    if (unnamed !== undefined) throw inconsistent(`transaction ${tx.hash} sent a message to ${unnamed.destination} with no source or created_lt`);
+    if (tx.parent === null) continue;
+    const parent = byHash.get(tx.parent);
+    if (parent === undefined || tx.inMsg === null) continue;
+    const sent = parent.outMsgs.find((m) => m.source === tx.inMsg?.source && m.createdLt === tx.inMsg?.createdLt);
+    if (sent === undefined || tx.inMsg.createdLt === null || sent.destination !== tx.account || sent.value !== tx.inMsg.value) {
+      throw inconsistent(`transaction ${tx.hash} received no message its parent ${parent.hash} sent`);
+    }
+  }
+  return trace;
 }
 
 export function definiteError(kind: ChainErrorKind, message: string): TonProviderError {

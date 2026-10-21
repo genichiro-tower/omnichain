@@ -2,9 +2,9 @@ import { jest } from '@jest/globals';
 
 import { CHAIN_ID_TON_MAINNET } from '../../chain_ids.ts';
 import { ChainErrorKinds } from '../../errors.ts';
-import { TonChain } from '../ton_chain.ts';
+import { REQUEST_EXPIRY_MARGIN_SECONDS, TonChain } from '../ton_chain.ts';
 import { TON_JETTON_TRANSFER_OP } from '../ton_messages.ts';
-import type { TonAccountState, TonProvider } from '../ton_provider.ts';
+import { type TonAccountState, TonBroadcastUncertainError, type TonProvider } from '../ton_provider.ts';
 import { TonUnsignedTransaction } from '../ton_transactions.ts';
 import { TonWallet } from '../ton_wallet.ts';
 import { JETTON_WALLET, MNEMONIC, OTHER, USDT_MASTER } from './ton_test_helpers.ts';
@@ -19,7 +19,7 @@ function fakeProvider(overrides: Partial<TonProvider> = {}): TonProvider {
     sendBoc: async () => {},
     getTrace: async () => null,
     emulate: async () => ({ complete: true, transactions: [] }),
-    getMasterchainSeqno: async () => 100,
+    getMasterchainHead: async () => ({ seqno: 100, utime: 1_700_000_000 }),
     ...overrides,
   };
 }
@@ -81,15 +81,36 @@ describe('TonChain', () => {
     expect(sendBoc).toHaveBeenCalledWith(request.boc);
   });
 
+  it('keeps an uncertain broadcast uncertain, with the hash to read', async () => {
+    const chain = chainWith(
+      fakeProvider({
+        sendBoc: async () => {
+          throw new TonBroadcastUncertainError('broadcast outcome unknown');
+        },
+      }),
+    );
+    const request = TonWallet.fromMnemonic(MNEMONIC).createExternalRequest({ seqno: 0, messages: [{ to: OTHER, value: 1n }] });
+    const err = await chain.broadcast(request.boc).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TonBroadcastUncertainError);
+    expect((err as TonBroadcastUncertainError).meta).toMatchObject({ txHash: request.hash });
+  });
+
   it('refuses a malformed transaction id', async () => {
     await expect(chainWith(fakeProvider()).getTransactionStatus('ABC')).rejects.toThrow(/64 lowercase hex/);
   });
 
-  it('calls a request expired only past validUntil with the seqno unmoved', async () => {
-    const chain = chainWith(fakeProvider({ getSeqno: async () => 3 }));
-    await expect(chain.isRequestExpired({ wallet: OTHER, seqno: 3, validUntil: 100, now: 99 })).resolves.toBe(false);
-    await expect(chain.isRequestExpired({ wallet: OTHER, seqno: 3, validUntil: 100, now: 101 })).resolves.toBe(true);
-    await expect(chain.isRequestExpired({ wallet: OTHER, seqno: 2, validUntil: 100, now: 101 })).resolves.toBe(false);
+  it('calls a request expired only on chain time past validUntil, the seqno unmoved and no trace', async () => {
+    const hash = 'ab'.repeat(32);
+    const validUntil = 1_000;
+    const at = (utime: number, overrides: Partial<TonProvider> = {}): TonChain =>
+      chainWith(fakeProvider({ getSeqno: async () => 3, getMasterchainHead: async () => ({ seqno: 100, utime }), ...overrides }));
+    const past = validUntil + REQUEST_EXPIRY_MARGIN_SECONDS + 1;
+    await expect(at(past).isRequestExpired({ wallet: OTHER, seqno: 3, validUntil, hash })).resolves.toBe(true);
+    // This machine's clock is far ahead; the chain's is not.
+    await expect(at(validUntil + 1).isRequestExpired({ wallet: OTHER, seqno: 3, validUntil, hash })).resolves.toBe(false);
+    await expect(at(past).isRequestExpired({ wallet: OTHER, seqno: 2, validUntil, hash })).resolves.toBe(false);
+    const landed = at(past, { getTrace: async () => ({ complete: false, transactions: [] }) });
+    await expect(landed.isRequestExpired({ wallet: OTHER, seqno: 3, validUntil, hash })).resolves.toBe(false);
   });
 
   it('reads TON and jetton balances', async () => {

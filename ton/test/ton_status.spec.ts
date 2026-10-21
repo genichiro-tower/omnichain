@@ -3,7 +3,7 @@ import { beginCell } from '@ton/core';
 import { CHAIN_ID_TON_MAINNET } from '../../chain_ids.ts';
 import { TransactionStatusTypes } from '../../transaction_status.ts';
 import { TON_JETTON_INTERNAL_TRANSFER_OP, TON_JETTON_TRANSFER_OP, TON_W5_SIGNED_INTERNAL_OP } from '../ton_messages.ts';
-import type { TonTrace, TonTraceMessage, TonTraceTransaction } from '../ton_provider.ts';
+import { type TonTrace, type TonTraceMessage, type TonTraceTransaction, assertTraceConsistent } from '../ton_provider.ts';
 import { TonTransactionStatus, summarizeTonTrace } from '../ton_transaction_status.ts';
 import { TonWallet } from '../ton_wallet.ts';
 import { JETTON_WALLET, MNEMONIC, OTHER, realTrace } from './ton_test_helpers.ts';
@@ -236,17 +236,27 @@ describe('TonTransactionStatus', () => {
     ]);
   });
 
-  it('refuses a trace whose receiver disagrees with the message it matched', async () => {
+  it('refuses, retryably, a trace whose receiver disagrees with its sender', async () => {
     const trace = await realTrace();
     const [root, child] = trace.transactions;
-    const tampered = { ...child, inMsg: { ...(child.inMsg as TonTraceMessage), value: 1n } };
-    expect(() =>
-      TonTransactionStatus.fromTrace({
-        chainId: CHAIN_ID_TON_MAINNET,
-        trace: { complete: true, transactions: [root, tampered] },
-        masterchainTip: 100472540,
-      }),
-    ).toThrow(/Inconsistent TON trace/);
+    expect(assertTraceConsistent('P', trace)).toBe(trace);
+    const refused = (transactions: TonTraceTransaction[]): unknown => {
+      try {
+        assertTraceConsistent('P', { complete: true, transactions });
+      } catch (err) {
+        return err;
+      }
+      return null;
+    };
+    const tampered = [
+      [root, { ...child, inMsg: { ...(child.inMsg as TonTraceMessage), value: 1n } }],
+      [root, { ...child, account: OTHER }],
+      [root, { ...child, inMsg: { ...(child.inMsg as TonTraceMessage), createdLt: 1n } }],
+      [{ ...root, outMsgs: [{ ...root.outMsgs[0], createdLt: null }] }, child],
+    ];
+    for (const transactions of tampered) {
+      expect(refused(transactions)).toMatchObject({ retryable: true, message: expect.stringContaining('inconsistent trace') });
+    }
   });
 
   it('is Failed when a wallet skipped a message it could not send', async () => {

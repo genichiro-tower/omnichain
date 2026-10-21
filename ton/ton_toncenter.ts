@@ -6,12 +6,15 @@ import { parseTonAddress } from './ton_messages.ts';
 import {
   type TonAccountState,
   type TonHttpEndpoint,
+  type TonMasterchainHead,
   type TonProvider,
   type TonTrace,
   type TonTraceMessage,
   type TonTraceTransaction,
+  TonProviderError,
   asAccountStatus,
   asBigInt,
+  assertTraceConsistent,
   asRecord,
   definiteError,
   errorMessageOf,
@@ -80,8 +83,10 @@ export class ToncenterProvider implements TonProvider {
     if (traces.length === 0) return null;
     const trace = asRecord(traces[0], 'trace');
     const info = asRecord(trace.trace_info ?? {}, 'trace_info');
-    const complete = trace.is_incomplete !== true && info.trace_state === 'complete' && Number(info.pending_messages ?? 0) === 0;
-    return { complete, transactions: orderedTransactions(trace.trace, asRecord(trace.transactions, 'transactions')) };
+    const { transactions, missing } = orderedTransactions(trace.trace, asRecord(trace.transactions, 'transactions'));
+    const complete =
+      !missing && trace.is_incomplete !== true && info.trace_state === 'complete' && Number(info.pending_messages ?? 0) === 0;
+    return assertTraceConsistent(NAME, { complete, transactions });
   }
 
   async emulate(boc: string): Promise<TonTrace> {
@@ -93,12 +98,15 @@ export class ToncenterProvider implements TonProvider {
     const error = errorMessageOf(reply);
     if (error !== null) throw definiteError(ChainErrorKinds.SimulationFailed, `${NAME} emulation failed: ${error}`);
     const result = asRecord(reply, 'emulation');
-    return { complete: true, transactions: orderedTransactions(result.trace, asRecord(result.transactions, 'transactions')) };
+    const { transactions, missing } = orderedTransactions(result.trace, asRecord(result.transactions, 'transactions'));
+    if (missing) throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} emulation returned a trace with missing transactions`, true);
+    return assertTraceConsistent(NAME, { complete: true, transactions });
   }
 
-  async getMasterchainSeqno(): Promise<number> {
+  async getMasterchainHead(): Promise<TonMasterchainHead> {
     const reply = asRecord(await this.get('/api/v3/masterchainInfo'), 'masterchainInfo');
-    return Number(asRecord(reply.last, 'last').seqno);
+    const last = asRecord(reply.last, 'last');
+    return { seqno: Number(last.seqno), utime: Number(last.gen_utime) };
   }
 
   /** The stack of a get-method that ran, or `null` when the account has no code to run it. */
@@ -130,21 +138,26 @@ function numAt(stack: ToncenterStackItem[], index: number, what: string): bigint
   return asBigInt(item.value, what);
 }
 
-/** The trace's transactions, root first then breadth-first along the trace tree. */
-function orderedTransactions(tree: unknown, byHash: Record<string, unknown>): TonTraceTransaction[] {
+/**
+ * The trace's transactions, root first then breadth-first along the trace
+ * tree. A node whose transaction the reply left out stays the parent of its
+ * children, and makes the trace `missing` a part.
+ */
+function orderedTransactions(tree: unknown, byHash: Record<string, unknown>): { transactions: TonTraceTransaction[]; missing: boolean } {
   const ordered: TonTraceTransaction[] = [];
+  let missing = false;
   const queue: Array<{ node: unknown; parent: string | null }> =
     tree === undefined || tree === null ? [] : [{ node: tree, parent: null }];
   while (queue.length > 0) {
     const { node: raw, parent } = queue.shift() as { node: unknown; parent: string | null };
     const node = asRecord(raw, 'trace node');
     const tx = byHash[String(node.tx_hash)];
-    const transaction = tx === undefined ? null : toTransaction(asRecord(tx, 'transaction'), parent);
-    if (transaction !== null) ordered.push(transaction);
+    if (tx === undefined) missing = true;
+    else ordered.push(toTransaction(asRecord(tx, 'transaction'), parent));
     const children = Array.isArray(node.children) ? node.children : [];
-    queue.push(...children.map((child) => ({ node: child, parent: transaction === null ? parent : transaction.hash })));
+    queue.push(...children.map((child) => ({ node: child, parent: base64ToHex(String(node.tx_hash)) })));
   }
-  return ordered;
+  return { transactions: ordered, missing };
 }
 
 function toTransaction(tx: Record<string, unknown>, parent: string | null): TonTraceTransaction {

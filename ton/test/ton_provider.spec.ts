@@ -4,6 +4,7 @@ import { jest } from '@jest/globals';
 
 import { ChainErrorKinds } from '../../errors.ts';
 import {
+  TonBroadcastUncertainError,
   type TonProvider,
   TonFallbackProvider,
   TonProviderError,
@@ -62,8 +63,8 @@ describe('tonHttpJson', () => {
 });
 
 describe('TonFallbackProvider', () => {
-  const answer = (name: string, getMasterchainSeqno: () => Promise<number>): TonProvider =>
-    ({ name, getMasterchainSeqno }) as unknown as TonProvider;
+  const answer = (name: string, getMasterchainHead: () => Promise<unknown>): TonProvider =>
+    ({ name, getMasterchainHead }) as unknown as TonProvider;
 
   it('uses the fallback only after a failure with no answer', async () => {
     const onFallback = jest.fn();
@@ -74,8 +75,8 @@ describe('TonFallbackProvider', () => {
       answer('fallback', async () => 7),
       onFallback,
     );
-    await expect(provider.getMasterchainSeqno()).resolves.toBe(7);
-    expect(onFallback).toHaveBeenCalledWith('getMasterchainSeqno', expect.any(TonProviderError));
+    await expect(provider.getMasterchainHead()).resolves.toBe(7);
+    expect(onFallback).toHaveBeenCalledWith('getMasterchainHead', expect.any(TonProviderError));
   });
 
   it('never second-guesses a definite answer', async () => {
@@ -86,7 +87,7 @@ describe('TonFallbackProvider', () => {
       }),
       answer('fallback', fallback),
     );
-    await expect(provider.getMasterchainSeqno()).rejects.toThrow('refused');
+    await expect(provider.getMasterchainHead()).rejects.toThrow('refused');
     expect(fallback).not.toHaveBeenCalled();
   });
 
@@ -97,7 +98,44 @@ describe('TonFallbackProvider', () => {
       }),
       null,
     );
-    await expect(provider.getMasterchainSeqno()).rejects.toThrow('HTTP 503');
+    await expect(provider.getMasterchainHead()).rejects.toThrow('HTTP 503');
+  });
+
+  describe('sendBoc', () => {
+    const unavailable = (): TonProviderError => new TonProviderError(ChainErrorKinds.RpcError, 'HTTP 503', true);
+    const refused = (): TonProviderError => new TonProviderError(ChainErrorKinds.BroadcastRejected, 'refused', false);
+    const sender = (name: string, sendBoc: () => Promise<void>): TonProvider => ({ name, sendBoc }) as unknown as TonProvider;
+
+    it('keeps a refusal with no failure before it definite', async () => {
+      const fallback = jest.fn(async () => {});
+      const provider = new TonFallbackProvider(sender('primary', async () => { throw refused(); }), sender('fallback', fallback));
+      const err = await provider.sendBoc('boc').catch((e: unknown) => e);
+      expect(err).not.toBeInstanceOf(TonBroadcastUncertainError);
+      expect((err as TonProviderError).kind).toBe(ChainErrorKinds.BroadcastRejected);
+      expect(fallback).not.toHaveBeenCalled();
+    });
+
+    it('sends through the fallback when the primary failed without an answer', async () => {
+      const fallback = jest.fn(async () => {});
+      const provider = new TonFallbackProvider(sender('primary', async () => { throw unavailable(); }), sender('fallback', fallback));
+      await expect(provider.sendBoc('boc')).resolves.toBeUndefined();
+      expect(fallback).toHaveBeenCalledWith('boc');
+    });
+
+    it('reads a refusal after a failure without an answer as uncertain', async () => {
+      const provider = new TonFallbackProvider(
+        sender('primary', async () => { throw unavailable(); }),
+        sender('fallback', async () => { throw refused(); }),
+      );
+      const err = await provider.sendBoc('boc').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(TonBroadcastUncertainError);
+      expect((err as TonProviderError).retryable).toBe(false);
+    });
+
+    it('reads a failure without an answer and no fallback as uncertain', async () => {
+      const provider = new TonFallbackProvider(sender('primary', async () => { throw unavailable(); }), null);
+      await expect(provider.sendBoc('boc')).rejects.toBeInstanceOf(TonBroadcastUncertainError);
+    });
   });
 });
 
@@ -167,6 +205,47 @@ describe('trace normalization', () => {
     expect(fromTonapi?.transactions[0]).toMatchObject({ success: false, skippedActions: 1 });
   });
 
+  type ToncenterTraceFixture = {
+    traces: Array<{ trace: { tx_hash: string; children: Array<{ tx_hash: string }> }; transactions: Record<string, { in_msg: Record<string, unknown> }> }>;
+  };
+
+  it('refuses a trace whose receiver disagrees with its sender, and the fallback answers', async () => {
+    const toncenter = fixture('toncenter_trace.json') as ToncenterTraceFixture;
+    const childHash = toncenter.traces[0].trace.children[0].tx_hash;
+    const child = toncenter.traces[0].transactions[childHash];
+    child.in_msg = { ...child.in_msg, value: '1' };
+    stubFetch(() => ({ status: 200, body: toncenter }));
+    const err = await new ToncenterProvider(ENDPOINT).getTrace(TRACE_HASH).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TonProviderError);
+    expect((err as TonProviderError).retryable).toBe(true);
+    expect((err as Error).message).toContain('inconsistent trace');
+
+    stubFetch((url) => {
+      if (url.startsWith('https://toncenter.test')) return { status: 200, body: toncenter };
+      if (url.includes('/v2/blockchain/blocks/')) return { status: 200, body: { master_ref: '(-1,8000000000000000,100472527)' } };
+      return { status: 200, body: fixture('tonapi_trace.json') };
+    });
+    const onFallback = jest.fn();
+    const provider = new TonFallbackProvider(
+      new ToncenterProvider({ url: 'https://toncenter.test', apiKey: 'key' }),
+      new TonapiProvider(ENDPOINT),
+      onFallback,
+    );
+    const trace = await provider.getTrace(TRACE_HASH);
+    expect(trace?.transactions).toHaveLength(2);
+    expect(onFallback).toHaveBeenCalledWith('getTrace', expect.any(TonProviderError));
+  });
+
+  it('reads a TON Center trace with a transaction left out as incomplete, keeping its children under it', async () => {
+    const toncenter = fixture('toncenter_trace.json') as ToncenterTraceFixture;
+    delete toncenter.traces[0].transactions[toncenter.traces[0].trace.tx_hash];
+    stubFetch(() => ({ status: 200, body: toncenter }));
+    const trace = await new ToncenterProvider(ENDPOINT).getTrace(TRACE_HASH);
+    expect(trace?.complete).toBe(false);
+    expect(trace?.transactions).toHaveLength(1);
+    expect(trace?.transactions[0].parent).toBe(TRACE_HASH);
+  });
+
   it('reads an unseen message as no trace', async () => {
     stubFetch(() => ({ status: 200, body: { traces: [] } }));
     await expect(new ToncenterProvider(ENDPOINT).getTrace(TRACE_HASH)).resolves.toBeNull();
@@ -193,11 +272,11 @@ describe('account reads', () => {
   });
 
   it('sends the key the way each provider expects', async () => {
-    const toncenter = stubFetch(() => ({ status: 200, body: { last: { seqno: 1 } } }));
-    await new ToncenterProvider(ENDPOINT).getMasterchainSeqno();
+    const toncenter = stubFetch(() => ({ status: 200, body: { last: { seqno: 1, gen_utime: 1700000000 } } }));
+    await new ToncenterProvider(ENDPOINT).getMasterchainHead();
     expect((toncenter.mock.calls[0][1] as RequestInit).headers).toMatchObject({ 'X-API-Key': 'key' });
-    const tonapi = stubFetch(() => ({ status: 200, body: { seqno: 1 } }));
-    await new TonapiProvider(ENDPOINT).getMasterchainSeqno();
+    const tonapi = stubFetch(() => ({ status: 200, body: { seqno: 1, gen_utime: 1700000000 } }));
+    await new TonapiProvider(ENDPOINT).getMasterchainHead();
     expect((tonapi.mock.calls[0][1] as RequestInit).headers).toMatchObject({ authorization: 'Bearer key' });
   });
 });

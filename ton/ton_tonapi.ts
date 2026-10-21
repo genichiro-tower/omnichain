@@ -5,12 +5,14 @@ import { tonRawAddress } from './ton_address.ts';
 import {
   type TonAccountState,
   type TonHttpEndpoint,
+  type TonMasterchainHead,
   type TonProvider,
   type TonTrace,
   type TonTraceTransaction,
   asAccountStatus,
   asBigInt,
   asRecord,
+  assertTraceConsistent,
   definiteError,
   errorMessageOf,
   tonHttpJson,
@@ -76,7 +78,7 @@ export class TonapiProvider implements TonProvider {
     if (reply === null) return null;
     const root = reply as TonapiTraceNode;
     const transactions = await this.withMasterchainSeqnos(flatten(root));
-    return { complete: isComplete(root), transactions };
+    return assertTraceConsistent(NAME, { complete: isComplete(root), transactions });
   }
 
   async emulate(boc: string): Promise<TonTrace> {
@@ -88,12 +90,12 @@ export class TonapiProvider implements TonProvider {
     const error = errorMessageOf(reply);
     if (error !== null) throw definiteError(ChainErrorKinds.SimulationFailed, `${NAME} emulation failed: ${error}`);
     const root = reply as TonapiTraceNode;
-    return { complete: true, transactions: flatten(root).map(({ tx, parent }) => toTransaction(tx, parent, null)) };
+    return assertTraceConsistent(NAME, { complete: true, transactions: flatten(root).map(({ tx, parent }) => toTransaction(tx, parent, null)) });
   }
 
-  async getMasterchainSeqno(): Promise<number> {
+  async getMasterchainHead(): Promise<TonMasterchainHead> {
     const reply = asRecord(await this.get('/v2/blockchain/masterchain-head'), 'masterchain-head');
-    return Number(reply.seqno);
+    return { seqno: Number(reply.seqno), utime: Number(reply.gen_utime) };
   }
 
   /**

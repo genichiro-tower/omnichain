@@ -24,6 +24,8 @@ const ton = new TonChain({
 
 - Every provider needs a key. A key not passed is read at first use from `TONCENTER_API_KEY` / `TONAPI_API_KEY`; without a TON Center key every call throws `RpcNotConfigured`, and without a TonAPI key there is no fallback.
 - **Fallback rule:** a call is retried once on TonAPI only when TON Center failed without an answer — a transport error, a timeout, HTTP 429 or 5xx. A definite answer (not found, a refused emulation, a refused message) is final. A broadcast retried on TonAPI sends the same BOC, which the wallet's seqno keeps from landing twice.
+- **An uncertain broadcast** throws `TonBroadcastUncertainError` (`RpcError`, with `meta.txHash`): TON Center failed without an answer and there was no fallback, or TonAPI then refused the message — which it also does for a message already accepted. The message may land. Read `getTransactionStatus(meta.txHash)`, or wait until `isRequestExpired` is true, before signing a replacement; a new request with a new seqno can pay twice. A refusal with no failure before it is `BroadcastRejected` and definite.
+- **A trace is checked before it is used**: every internal message must name its source and `created_lt`, and every transaction must have received a message its parent sent, to that account, with that value. A provider whose trace breaks this — or, on TON Center, leaves a transaction out of an emulation — fails retryably, so the trace is read from TonAPI. A TON Center trace that leaves a transaction out is incomplete (`Pending`), and that transaction's children keep it as their parent.
 - Both providers normalize to the same types (`TonAccountState`, `TonTrace`, `TonTraceTransaction`, `TonTraceMessage`). TonAPI's trace transactions carry no `out_msgs`, so its messages are read from each transaction's BOC.
 
 ## Addresses
@@ -72,7 +74,7 @@ The relay message is bounceable: a request that fails in the target returns the 
 - `getAccountState(address)` — `nonexist | uninit | active | frozen`, balance and code hash. TON Center reports a never-used address as `uninit`; it is read as `nonexist`.
 - `getSeqno(address)` — 0 while the wallet is not deployed.
 - `getBalance(owner, jettonMaster?)` and `getJettonWalletAddress(jettonMaster, owner)` — through the master's `get_wallet_address` and the wallet's `get_wallet_data`; an undeployed jetton wallet reads 0.
-- `getChainTipHeight()` — the masterchain's latest block.
+- `getChainTipHeight()` — the masterchain's latest block (`provider.getMasterchainHead()` also gives its time).
 
 ## Emulation, broadcast and status
 
@@ -83,9 +85,9 @@ The relay message is bounceable: a request that fails in the target returns the 
   - `Failed` when the request did not do what it was signed for: the sending wallet's transaction (or, for a relayed request, the target wallet's) failed or skipped a message (`skipped_actions`), the target did not execute the request (`request_not_executed`), or a message those wallets sent `bounced` or was `undelivered`;
   - `Success` otherwise, with the TON balance changes, `fees`, `jettonCredits`, the trace, `masterchainSeqno` and `masterchainDepth`.
 - A bounceable message is `bounced` when its receiver failed or aborted — including an address with no code yet, which returns the value. A jetton transfer is judged where the jettons land, in the receiver's jetton wallet (`jetton_bounced` / `jetton_undelivered` when they do not).
-- `summary.deliveries` lists every message the sending wallets sent, in the order each wallet sent them (the request's order), with its outcome (`delivered`, `bounced`, `undelivered`, `pending`). A message is matched to the transaction that received it by (source, `created_lt`), which names one message; its destination and value must agree, or the status throws an inconsistent-trace `RpcError` rather than judge from bad data; a failed status carries it too, so a caller can tell which messages arrived. A non-bounceable message is `delivered` even when its receiver then fails — the value stays there. Failures further down the trace (a recipient that throws on a jetton notification, a skipped excess refund) do not undo deliveries; they are in `failedTransactions` / `bouncedMessages` and do not fail the status.
+- `summary.deliveries` lists every message the sending wallets sent, in the order each wallet sent them (the request's order), with its outcome (`delivered`, `bounced`, `undelivered`, `pending`). A message is matched to the transaction that received it by (source, `created_lt`), which names one message (the providers refuse a trace where the receiver's account or value disagrees); a failed status carries the deliveries too, so a caller can tell which messages arrived. A non-bounceable message is `delivered` even when its receiver then fails — the value stays there. Failures further down the trace (a recipient that throws on a jetton notification, a skipped excess refund) do not undo deliveries; they are in `failedTransactions` / `bouncedMessages` and do not fail the status.
 - A transaction succeeds when its compute phase succeeded — or was skipped only because the account has no code yet, a plain transfer to an undeployed address — and its action phase, if any, succeeded.
-- `isRequestExpired({ wallet, seqno, validUntil })` — true once `validUntil` has passed and the wallet's seqno never moved past the request's: the request can no longer land.
+- `isRequestExpired({ wallet, seqno, validUntil, hash })` — true when the request can no longer land, so a replacement cannot pay twice: the masterchain's latest block is more than `REQUEST_EXPIRY_MARGIN_SECONDS` (60) past `validUntil` — the chain's clock, not this machine's — the wallet's seqno never moved past the request's, and there is no trace of `hash`.
 
 ### Provider differences
 
