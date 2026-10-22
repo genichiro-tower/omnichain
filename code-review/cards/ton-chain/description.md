@@ -420,6 +420,13 @@ PR: `getomnichain/omnichain#17` (`genichiro-tower:feature/ton-chain` →
     jetton asset, as Python does, each transfer checked against its master
     (a fake jetton wallet moves nothing); mints and burns are not counted.
   - The jetton explorer link uses the master's `EQ…` form.
+- **R4, derivation:** without a path, `fromMnemonic` uses TON's own
+  mnemonic scheme — the Python SDK's key and W5 address for the same words
+  (pinned by Python-computed vectors); Python's marker `m/44'/607'/0'/0/0`
+  means the same; a passphrase is refused there (Python ignores it). With a
+  path (`derivationPath({ account })`) it stays BIP-39 / SLIP-0010, for
+  depositron's vaults; `m/44'/607'/0'` is that scheme's account 0, not
+  Python's key. v4r2 wallets (Python's default) come later.
 - **R4, signatures:** `TonChain.verifySignature(publicKey, message, sig)`
   verifies with the public key only; signatures must be exactly 128 hex.
 - The root entry exports only `TonAddress`; the family is `./ton`.

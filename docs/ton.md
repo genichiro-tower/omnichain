@@ -58,12 +58,22 @@ A TON transfer to an address whose wallet is not deployed must use the **non-bou
 ```ts
 import { TonWallet } from '@getomnichain/omnichain/ton';
 
-const wallet = TonWallet.fromMnemonic(mnemonic, { derivationPath: TonWallet.derivationPath({ account: 7 }) });
-wallet.address;                                   // 0:…
-wallet.addressUserFriendly({ bounceable: false }); // UQ…
+const own = TonWallet.fromMnemonic(tonWalletWords);  // TON's own scheme: the wallet's account, as the Python SDK gives it
+const vault = TonWallet.fromMnemonic(mnemonic, { derivationPath: TonWallet.derivationPath({ account: 7 }) }); // indexed
+vault.address;                                   // 0:…
+vault.addressUserFriendly({ bounceable: false }); // UQ…
 ```
 
-- The key is derived from a **BIP-39** mnemonic with SLIP-0010 ed25519 at the hardened path `m/44'/607'/<account>'` — not TON's own 24-word scheme, which cannot derive indexed keys.
+Two derivations, chosen by whether a path is given:
+
+| | No `derivationPath` (or Python's marker `m/44'/607'/0'/0/0`) | A `derivationPath` (`m/44'/607'/<account>'`) |
+|---|---|---|
+| Scheme | TON's own mnemonic scheme (HMAC-SHA512, then PBKDF2-SHA512 "TON default seed", 100,000 rounds) — what TON wallets, `@ton/crypto` and the Python SDK use | BIP-39 seed, then SLIP-0010 ed25519 at the hardened path |
+| Accounts | One per mnemonic: a wallet's own words give its W5 account, the same key and address as the Python SDK (`version='v5r1'`) | Many: one per account index, for vaults derived from one mnemonic |
+| Passphrase | Refused (the Python SDK ignores it) | BIP-39 passphrase |
+
+- `m/44'/607'/0'` is account 0 of the path scheme, **not** the Python SDK's key, although the Python SDK accepts that string as a marker. Without a path the words are trimmed and lowercased, as in Python, and not validated.
+- Only W5 (v5r1) wallets are built: a mnemonic whose wallet is v4r2 (the Python SDK's default version) gives the same key but a different address.
 - The account is a W5R1 wallet on workchain 0 with the mainnet client wallet id. `stateInit` deploys it.
 - `createExternalRequest({ seqno, messages, validUntil, deploy })` is a request the wallet sends itself (and pays for). W5 sends external requests with "ignore errors" (+2) on every message.
 - `createInternalRequest({ seqno, messages, validUntil })` is a request for a relayer (op `0x73696e74`). Send modes are kept as given, so without +2 its messages leave together or not at all.

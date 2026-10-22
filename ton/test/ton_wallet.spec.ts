@@ -3,9 +3,9 @@ import { createHash } from 'node:crypto';
 import { Cell, beginCell, loadMessage } from '@ton/core';
 import { WalletContractV5R1 } from '@ton/ton';
 
-import { signVerify } from '@ton/crypto';
+import { mnemonicNew, mnemonicToPrivateKey, signVerify } from '@ton/crypto';
 
-import { TonWallet, deriveSlip10Ed25519Seed } from '../ton_wallet.ts';
+import { TON_PYTHON_MARKER_PATH, TonWallet, deriveSlip10Ed25519Seed } from '../ton_wallet.ts';
 import { CHAIN_ID_TON_MAINNET } from '../../chain_ids.ts';
 import { TonSignedMessage, tonInternalRequestOf, tonMessageHash, tonW5RequestFields } from '../ton_messages.ts';
 import { TonChain } from '../ton_chain.ts';
@@ -34,7 +34,8 @@ describe('SLIP-0010 ed25519', () => {
 });
 
 describe('TonWallet', () => {
-  const wallet = TonWallet.fromMnemonic(MNEMONIC);
+  // SLIP-0010 account 0: the derivation a path selects.
+  const wallet = TonWallet.fromMnemonic(MNEMONIC, { derivationPath: TonWallet.derivationPath() });
 
   it("derives the W5R1 wallet of m/44'/607'/<account>'", () => {
     expect(WalletContractV5R1.create({ workchain: 0, publicKey: wallet.publicKey }).address.toRawString()).toBe(
@@ -43,7 +44,7 @@ describe('TonWallet', () => {
     expect(TonWallet.derivationPath({ account: 3 })).toBe("m/44'/607'/3'");
     const second = TonWallet.fromMnemonic(MNEMONIC, { derivationPath: TonWallet.derivationPath({ account: 1 }) });
     expect(second.address).not.toBe(wallet.address);
-    expect(TonWallet.fromMnemonic(MNEMONIC).address).toBe(wallet.address);
+    expect(TonWallet.fromMnemonic(MNEMONIC, { derivationPath: "m/44'/607'/0'" }).address).toBe(wallet.address);
   });
 
   it('gives fixed addresses for the BIP-39 test vector (AC2)', () => {
@@ -59,8 +60,56 @@ describe('TonWallet', () => {
   });
 
   it('refuses a non-hardened or foreign derivation path', () => {
-    expect(() => TonWallet.fromMnemonic(MNEMONIC, { derivationPath: "m/44'/607'/0'/0/0" })).toThrow(/derivation path/);
+    expect(() => TonWallet.fromMnemonic(MNEMONIC, { derivationPath: "m/44'/607'/1'/0/0" })).toThrow(/derivation path/);
     expect(() => TonWallet.fromMnemonic(MNEMONIC, { derivationPath: "m/44'/195'/0'" })).toThrow(/derivation path/);
+  });
+
+  describe("without a path: TON's own scheme, the Python SDK's account", () => {
+    // Computed by the Python SDK (omnichain 0.0.3, TonWallet.from_mnemonic(phrase, version='v5r1')).
+    // The 24-word phrase was generated for this test and has never held funds.
+    const PYTHON_VECTORS = [
+      {
+        phrase: MNEMONIC,
+        publicKey: 'af19469000fc85b42ef8800249debdaf430dc91da21f45a7da137f51062cdc91',
+        address: '0:7b018a245a15b9a3002d4f23a24dae92c220fcb221de347a35a0b50b2960aa7d',
+      },
+      {
+        phrase: 'gospel cheap myth general inmate reduce board mango syrup lizard check sunset produce uniform crucial month theory spy occur crystal infant riot peace engine',
+        publicKey: '50d86d7bdb559ee34d3ed8360f38bef92684a82fed621e272909d4bb0bb14292',
+        address: '0:e05ecac2bdf64a8f3feaa541248a368a66d0febd74c65ad23f4ec004292e7c80',
+      },
+    ];
+
+    it.each(PYTHON_VECTORS)('gives the Python SDK key and W5 address for $address', ({ phrase, publicKey, address }) => {
+      const native = TonWallet.fromMnemonic(phrase);
+      expect(native.publicKey.toString('hex')).toBe(publicKey);
+      expect(native.address).toBe(address);
+      // Python's marker path is the same account, and so is the phrase with other spacing and case.
+      expect(TonWallet.fromMnemonic(phrase, { derivationPath: TON_PYTHON_MARKER_PATH }).address).toBe(address);
+      expect(TonWallet.fromMnemonic(`  ${phrase.toUpperCase().split(' ').join('   ')}\n`).address).toBe(address);
+    });
+
+    it("matches @ton/crypto's mnemonicToPrivateKey on a fresh TON mnemonic", async () => {
+      const words = await mnemonicNew(24);
+      const expected = await mnemonicToPrivateKey(words);
+      expect(TonWallet.fromMnemonic(words.join(' ')).publicKey.equals(expected.publicKey)).toBe(true);
+    });
+
+    it("is not a path's account: m/44'/607'/0' keeps the BIP-39 / SLIP-0010 derivation", () => {
+      expect(TonWallet.fromMnemonic(MNEMONIC).address).not.toBe(wallet.address);
+      expect(wallet.address).toBe('0:47caefa86550c7458435fab2a51aaa47cb9c80a9a9cf062ac440d30d3a67c72e');
+    });
+
+    it('refuses a passphrase, which the Python SDK ignores, and takes one with a path', () => {
+      expect(() => TonWallet.fromMnemonic(MNEMONIC, { passphrase: 'x' })).toThrow(/passphrase/);
+      expect(() => TonWallet.fromMnemonic(MNEMONIC, { derivationPath: TON_PYTHON_MARKER_PATH, passphrase: 'x' })).toThrow(/passphrase/);
+      expect(TonWallet.fromMnemonic(MNEMONIC, { passphrase: '' }).address).toBe(PYTHON_VECTORS[0].address);
+      expect(TonWallet.fromMnemonic(MNEMONIC, { derivationPath: TonWallet.derivationPath(), passphrase: 'x' }).address).not.toBe(wallet.address);
+    });
+
+    it('refuses an empty mnemonic', () => {
+      expect(() => TonWallet.fromMnemonic('   ')).toThrow(/empty/);
+    });
   });
 
   it('builds an external request, with its StateInit while undeployed', () => {

@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto';
+import { createHmac, pbkdf2Sync } from 'node:crypto';
 
 import { type Cell, type StateInit, beginCell, external, storeMessage } from '@ton/core';
 import { keyPairFromSeed, sign } from '@ton/crypto';
@@ -52,6 +52,26 @@ export function deriveSlip10Ed25519Seed(bip39Seed: Uint8Array, path: readonly nu
 /** The ed25519 seed of `m/44'/607'/{index}'`. */
 export function deriveTonEd25519Seed(bip39Seed: Uint8Array, index: number): Buffer {
   return deriveSlip10Ed25519Seed(bip39Seed, [44, TON_COIN_TYPE, index]);
+}
+
+/** The path the Python SDK accepts as a marker for TON's own scheme; it derives nothing. */
+export const TON_PYTHON_MARKER_PATH = "m/44'/607'/0'/0/0";
+
+const TON_NATIVE_SEED_SALT = 'TON default seed';
+const TON_NATIVE_PBKDF2_ITERATIONS = 100_000;
+
+/**
+ * The ed25519 seed TON's own mnemonic scheme gives (what TON wallets,
+ * `@ton/crypto`'s `mnemonicToPrivateKey` and the Python SDK compute):
+ * HMAC-SHA512 of the words keyed by the phrase, then PBKDF2-SHA512 with
+ * "TON default seed", 100,000 rounds; the first 32 bytes. The words are
+ * trimmed and lowercased, as the Python SDK does; they are not validated.
+ */
+export function deriveTonNativeSeed(mnemonicStr: string): Buffer {
+  const words = mnemonicStr.trim().toLowerCase().split(/\s+/).filter((word) => word.length > 0);
+  if (words.length === 0) throw new ChainError(ChainErrorKinds.InvalidArgument, 'The mnemonic is empty');
+  const entropy = createHmac('sha512', words.join(' ')).update('').digest();
+  return pbkdf2Sync(entropy, TON_NATIVE_SEED_SALT, TON_NATIVE_PBKDF2_ITERATIONS, 64, 'sha512').subarray(0, 32);
 }
 
 export interface TonRequestArgs {
@@ -117,8 +137,27 @@ export class TonWallet extends AbstractBip32StyleSingleAccountWallet {
     return TonWallet.walletFamily();
   }
 
+  /**
+   * - **No `derivationPath`** (or Python's marker `m/44'/607'/0'/0/0`): TON's
+   *   own mnemonic scheme, as TON wallets and the Python SDK derive it — one
+   *   key per mnemonic, so a wallet's own words give its W5 account. A
+   *   passphrase is refused: Python ignores it, so honouring it would give a
+   *   key Python does not.
+   * - **A `derivationPath`** (`derivationPath({ account })`): BIP-39 and
+   *   SLIP-0010 at that path — many accounts from one mnemonic. Note that
+   *   `m/44'/607'/0'` is account 0 of this scheme, not Python's key.
+   */
   static fromMnemonic(mnemonicStr: string, opts: { derivationPath?: string; passphrase?: string } = {}): TonWallet {
-    const index = TonWallet.indexFromDerivationPath(opts.derivationPath ?? TonWallet.derivationPath());
+    if (opts.derivationPath === undefined || opts.derivationPath === TON_PYTHON_MARKER_PATH) {
+      if (opts.passphrase !== undefined && opts.passphrase !== '') {
+        throw new ChainError(
+          ChainErrorKinds.InvalidArgument,
+          "TON's own mnemonic scheme takes no passphrase here (the Python SDK ignores it); pass a derivationPath to use one",
+        );
+      }
+      return new TonWallet(deriveTonNativeSeed(mnemonicStr));
+    }
+    const index = TonWallet.indexFromDerivationPath(opts.derivationPath);
     return new TonWallet(deriveTonEd25519Seed(mnemonicToSeedBip39(mnemonicStr, opts.passphrase ?? ''), index));
   }
 
