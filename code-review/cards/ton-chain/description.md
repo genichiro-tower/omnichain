@@ -292,7 +292,7 @@ afterwards whether it did.
     `bounced`, value back to the fee payer;
   - the run spent 0.0029 TON; the replies are recorded and replayed under
     `npm test`.
-- The live suite (24 tests) also checks both providers against each other:
+- The live suite (27 tests) also checks both providers against each other:
   the masterchain head, emulation and the sent trace alike (both passing the
   trace check), `getRequestState` on a request never sent (`expired` /
   `live`) and on one that landed (`consumed`), a resend of a landed message
@@ -303,9 +303,10 @@ afterwards whether it did.
   paid fees within a fifth of the emulated ones (equal on the last run),
   and USDT resolved from its TEP-64 metadata (`USD₮`, 6) alike on both
   providers with a transfer priced in its decimals, and every kind of wallet
-  (W5, v4r2, v3r2 at a path; W5 with no path) on its own requests. Last run
+  (W5, v4r2, v3r2 at a path; W5 with no path) on its own requests, and
+  funding a workchain -1 wallet of each version (emulated only). Last run
   2026-10-22: 24 passed, 0.0163 TON; 33 recorded scenarios.
-- 1968 tests pass (the 33 recorded scenarios included).
+- 1972 tests pass (the 33 recorded scenarios included).
 
 <!-- ====================== PART C - DEVIATIONS ====================== -->
 
