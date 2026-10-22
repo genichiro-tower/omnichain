@@ -1,4 +1,4 @@
-import type { Cell, Message } from '@ton/core';
+import { type Cell, Cell as CoreCell, type Message } from '@ton/core';
 
 import { ChainError, ChainErrorKinds, type ChainErrorKind, type ChainErrorMeta } from '../errors.ts';
 import { tonNormalizedExternalHash } from './ton_messages.ts';
@@ -90,6 +90,10 @@ export interface TonProvider {
   getJettonWalletAddress(jettonMaster: string, owner: string): Promise<string>;
   /** 0 for a jetton wallet that is not deployed. */
   getJettonBalance(jettonWallet: string): Promise<bigint>;
+  /** A jetton master's TEP-64 content cell (`get_jetton_data`); `InvalidTokenIdentifier` for anything that is not a jetton master. */
+  getJettonContent(jettonMaster: string): Promise<Cell>;
+  /** A deployed jetton wallet's balance, owner and master (`get_wallet_data`); `null` when it has no code. */
+  getJettonWalletData(jettonWallet: string): Promise<TonJettonWalletData | null>;
   sendBoc(boc: string): Promise<void>;
   /** By the normalized external-message hash (hex); `null` while the provider has not seen it. */
   getTrace(hash: string): Promise<TonTrace | null>;
@@ -97,6 +101,14 @@ export interface TonProvider {
   emulate(boc: string): Promise<TonTrace>;
   /** The latest masterchain block the provider has applied: its seqno and generation time (unix seconds). */
   getMasterchainHead(): Promise<TonMasterchainHead>;
+}
+
+export interface TonJettonWalletData {
+  balance: bigint;
+  /** Raw. */
+  owner: string;
+  /** Raw. */
+  jettonMaster: string;
 }
 
 export interface TonMasterchainHead {
@@ -164,6 +176,14 @@ export class TonFallbackProvider implements TonProvider {
 
   getJettonBalance(jettonWallet: string): Promise<bigint> {
     return this.call('getJettonBalance', (p) => p.getJettonBalance(jettonWallet));
+  }
+
+  getJettonContent(jettonMaster: string): Promise<Cell> {
+    return this.call('getJettonContent', (p) => p.getJettonContent(jettonMaster));
+  }
+
+  getJettonWalletData(jettonWallet: string): Promise<TonJettonWalletData | null> {
+    return this.call('getJettonWalletData', (p) => p.getJettonWalletData(jettonWallet));
   }
 
   /**
@@ -356,6 +376,36 @@ function malformed(what: string): TonProviderError {
 export function asRequiredRecord(value: unknown, what: string): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw malformed(`${what} is missing or not an object`);
   return value as Record<string, unknown>;
+}
+
+/** A get-method stack entry that is a cell or slice: TON Center gives base64 (`value`), TonAPI hex (`cell`). */
+export function stackCellOf(item: unknown, what: string): Cell {
+  const entry = asRequiredRecord(item, what);
+  if (entry.type !== 'cell' && entry.type !== 'slice') throw malformed(`${what} is not a cell`);
+  try {
+    if (typeof entry.value === 'string') return CoreCell.fromBase64(entry.value);
+    if (typeof entry.cell === 'string') return CoreCell.fromBoc(Buffer.from(entry.cell, 'hex'))[0];
+  } catch {
+    throw malformed(`${what} is not a valid cell`);
+  }
+  throw malformed(`${what} carries no cell`);
+}
+
+/** `get_wallet_data`'s stack — balance, owner, master, code — as both providers give it. */
+export function jettonWalletDataOf(stack: unknown): TonJettonWalletData {
+  if (!Array.isArray(stack) || stack.length < 3) throw malformed('get_wallet_data returned a short stack');
+  const balanceEntry = asRequiredRecord(stack[0], 'jetton balance');
+  const balance = asBigInt(balanceEntry.value ?? balanceEntry.num, 'jetton balance');
+  try {
+    return {
+      balance,
+      owner: stackCellOf(stack[1], 'jetton wallet owner').beginParse().loadAddress().toRawString(),
+      jettonMaster: stackCellOf(stack[2], 'jetton master').beginParse().loadAddress().toRawString(),
+    };
+  } catch (err) {
+    if (err instanceof TonProviderError) throw err;
+    throw malformed('get_wallet_data returned no addresses');
+  }
 }
 
 /** A required boolean field; see {@link asRequiredRecord}. */

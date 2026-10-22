@@ -292,7 +292,7 @@ afterwards whether it did.
     `bounced`, value back to the fee payer;
   - the run spent 0.0029 TON; the replies are recorded and replayed under
     `npm test`.
-- The live suite (17 tests) also checks both providers against each other:
+- The live suite (18 tests) also checks both providers against each other:
   the masterchain head, emulation and the sent trace alike (both passing the
   trace check), `getRequestState` on a request never sent (`expired` /
   `live`) and on one that landed (`consumed`), a resend of a landed message
@@ -300,9 +300,11 @@ afterwards whether it did.
   failed (`live`, seqno unchanged) then executed when delivered again
   (`consumed`, its seqno and `validUntil` read back from the trace), AC5,
   AC6 (a jetton transfer bounced by a jetton wallet with no code), and the
-  paid fees within a fifth of the emulated ones (equal on the last run).
-  Last run 2026-10-22: 17 passed, 0.0062 TON; 17 recorded scenarios.
-- 1899 tests pass (141 for TON, the 17 recorded scenarios included).
+  paid fees within a fifth of the emulated ones (equal on the last run),
+  and USDT resolved from its TEP-64 metadata (`USD₮`, 6) alike on both
+  providers with a transfer priced in its decimals. Last run 2026-10-22: 18
+  passed, 0.0062 TON; 17 recorded scenarios.
+- 1923 tests pass (165 for TON, the 17 recorded scenarios included).
 
 <!-- ====================== PART C - DEVIATIONS ====================== -->
 
@@ -400,7 +402,24 @@ PR: `getomnichain/omnichain#17` (`genichiro-tower:feature/ton-chain` →
   transactions are judged from their BOC, not its optional JSON phases. A
   jetton wallet reads 0 only with no code (TON Center -13; TonAPI 404
   confirmed by the account state). A trace must be the requested message's.
-- **R5, native transfers:** bounceable to `EQ…`, not to `UQ…` or raw.
+- **Parity with Python (assets, transfers, jetton balances):**
+  - `resolveAsset` reads TEP-64 metadata (`get_jetton_data`, on-chain and
+    off-chain over https); decimals are never guessed (TEP-64's 9 only when
+    the metadata, fully read, names none). `getJettonMetadata`,
+    `createAsset`, `getJettonAsset`, `getAssetExplorerUrl`, `ton_assets.ts`
+    (`TON_USDT` `USD₮` 6). Providers gain `getJettonContent` and
+    `getJettonWalletData`.
+  - Transfers take `TonTransferOptions`: `amountHr` for jettons;
+    `isFullBalance` (native: send mode 130, value 0, as Python; jettons: the
+    whole jetton balance, where Python ignores it); overrides for `bounce`,
+    `sendMode`, attached and forwarded TON.
+  - Native bounce, unless given: only to a bounceable `EQ…` address that is
+    deployed. Deliberately not Python's `false`, which loses TON sent to a
+    failing contract; for wallets the two agree.
+  - Status and emulation report jetton balance changes per owner in the
+    jetton asset, as Python does, each transfer checked against its master
+    (a fake jetton wallet moves nothing); mints and burns are not counted.
+  - The jetton explorer link uses the master's `EQ…` form.
 - **R4, signatures:** `TonChain.verifySignature(publicKey, message, sig)`
   verifies with the public key only; signatures must be exactly 128 hex.
 - The root entry exports only `TonAddress`; the family is `./ton`.
@@ -409,6 +428,8 @@ PR: `getomnichain/omnichain#17` (`genichiro-tower:feature/ton-chain` →
 
 # Follow-ups raised
 
-The review's remaining Medium items (PR #17, "Known open items"): 404 / failed get-method read as 0, `jettonCredits` /
-`failedTransactions` predicates, emulation `ignoreSignature` and sender fees,
-native bounce flag, pinned `@ton/*`, the fallback log line.
+The review's remaining Medium items (PR #17, "Known open items"):
+`failedTransactions` predicate, emulation `ignoreSignature` and sender fees,
+pinned `@ton/*`, the fallback log line; from round 12, broadcast replies of
+404 / empty read as sent, TonAPI's seqno 0 unconfirmed, `verifySignature`
+throwing on a malformed key.

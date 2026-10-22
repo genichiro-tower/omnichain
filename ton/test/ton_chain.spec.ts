@@ -8,7 +8,8 @@ import { TON_JETTON_TRANSFER_OP } from '../ton_messages.ts';
 import { type TonAccountState, TonBroadcastUncertainError, TonFallbackProvider, type TonProvider, TonProviderError } from '../ton_provider.ts';
 import { TonUnsignedTransaction } from '../ton_transactions.ts';
 import { TonWallet } from '../ton_wallet.ts';
-import { JETTON_WALLET, MNEMONIC, OTHER, USDT_MASTER, realTrace } from './ton_test_helpers.ts';
+import type { TonMetadataFetcher } from '../ton_jetton_metadata.ts';
+import { JETTON_WALLET, MNEMONIC, OTHER, USDT_MASTER, realTrace, usdtJettonContent, usdtOffchainMetadata } from './ton_test_helpers.ts';
 
 function fakeProvider(overrides: Partial<TonProvider> = {}): TonProvider {
   return {
@@ -21,12 +22,21 @@ function fakeProvider(overrides: Partial<TonProvider> = {}): TonProvider {
     getTrace: async () => null,
     emulate: async () => ({ complete: true, transactions: [] }),
     getMasterchainHead: async () => ({ seqno: 100, utime: 1_700_000_000 }),
+    getJettonContent: async () => usdtJettonContent(),
+    getJettonWalletData: async () => null,
     ...overrides,
   };
 }
 
-function chainWith(provider: TonProvider): TonChain {
-  return new TonChain({ chainId: CHAIN_ID_TON_MAINNET, name: 'TON Mainnet', explorerUrl: 'https://tonviewer.com', toncenter: { url: 'https://x' }, provider });
+function chainWith(provider: TonProvider, fetchMetadata: TonMetadataFetcher = async () => usdtOffchainMetadata()): TonChain {
+  return new TonChain({
+    chainId: CHAIN_ID_TON_MAINNET,
+    name: 'TON Mainnet',
+    explorerUrl: 'https://tonviewer.com',
+    toncenter: { url: 'https://x' },
+    provider,
+    fetchMetadata,
+  });
 }
 
 describe('TonChain', () => {
@@ -58,9 +68,6 @@ describe('TonChain', () => {
     const jetton = await chain.createTransferUnsignedTransaction({ from, to: OTHER, tokenIdentifier: USDT_MASTER, amount: 10_000n });
     expect(jetton.messages[0].to).toBe(JETTON_WALLET);
     expect(jetton.messages[0].body?.beginParse().loadUint(32)).toBe(TON_JETTON_TRANSFER_OP);
-    await expect(
-      chain.createTransferUnsignedTransaction({ from, to: OTHER, tokenIdentifier: USDT_MASTER, isFullBalance: true }),
-    ).rejects.toThrow(/amount/);
   });
 
   it.each([

@@ -6,6 +6,7 @@ import { parseTonAddress } from './ton_messages.ts';
 import {
   type TonAccountState,
   type TonHttpEndpoint,
+  type TonJettonWalletData,
   type TonMasterchainHead,
   type TonProvider,
   type TonTransactionPhases,
@@ -25,6 +26,8 @@ import {
   asRecord,
   definiteError,
   errorMessageOf,
+  jettonWalletDataOf,
+  stackCellOf,
   tonTransactionOutcome,
   tonBroadcastReply,
   tonHttpJson,
@@ -92,6 +95,27 @@ export class ToncenterProvider implements TonProvider {
       throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} could not run get_wallet_data on ${jettonWallet}`, true);
     }
     return numAt(reply.stack as ToncenterStackItem[], 0, 'jetton balance');
+  }
+
+  async getJettonContent(jettonMaster: string): Promise<Cell> {
+    const reply = await this.runGetMethodReply(jettonMaster, 'get_jetton_data', []);
+    if (errorMessageOf(reply) !== null) {
+      throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} could not run get_jetton_data on ${jettonMaster}`, true);
+    }
+    // A VM exit code is the chain's answer: no code (-13), or no such get-method.
+    if (Number(reply.exit_code) !== 0) throw definiteError(ChainErrorKinds.InvalidTokenIdentifier, `${jettonMaster} is not a jetton master`);
+    const stack = Array.isArray(reply.stack) ? reply.stack : [];
+    return stackCellOf(stack[3], 'jetton content');
+  }
+
+  async getJettonWalletData(jettonWallet: string): Promise<TonJettonWalletData | null> {
+    const reply = await this.runGetMethodReply(jettonWallet, 'get_wallet_data', []);
+    const exitCode = Number(reply.exit_code);
+    if (errorMessageOf(reply) === null && exitCode === NO_CODE_EXIT_CODE) return null;
+    if (errorMessageOf(reply) !== null || exitCode !== 0) {
+      throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} could not run get_wallet_data on ${jettonWallet}`, true);
+    }
+    return jettonWalletDataOf(reply.stack);
   }
 
   async sendBoc(boc: string): Promise<void> {

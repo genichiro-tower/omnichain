@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
+import { Cell } from '@ton/core';
+
 import type { TonTrace, TonTraceMessage, TonTraceTransaction } from '../ton_provider.ts';
 import { ToncenterProvider } from '../ton_toncenter.ts';
 
@@ -82,4 +84,15 @@ export function settled(transactions: readonly TonTraceTransaction[]): TonTraceT
       ),
   );
   return [...txs, ...receivers];
+}
+
+/** USDT's real TEP-64 content cell (on-chain: `decimals` 6 and the off-chain `uri`), as TON Center returned it. */
+export function usdtJettonContent(): Cell {
+  const reply = JSON.parse(readFileSync(new URL('./fixtures/toncenter_usdt_jetton_data.json', import.meta.url), 'utf8'));
+  return Cell.fromBase64(reply.stack[3].value);
+}
+
+/** USDT's real off-chain metadata (https://tether.to/usdt-ton.json): a symbol and a name, no decimals. */
+export function usdtOffchainMetadata(): unknown {
+  return JSON.parse(readFileSync(new URL('./fixtures/usdt_offchain_metadata.json', import.meta.url), 'utf8'));
 }

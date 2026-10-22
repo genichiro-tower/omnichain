@@ -311,7 +311,13 @@ describe('TonTransactionStatus', () => {
       inMsg: { ...(child.inMsg as NonNullable<TonTraceTransaction['inMsg']>), opcode: TON_JETTON_INTERNAL_TRANSFER_OP, body },
     };
     expect(summarizeTonTrace(CHAIN_ID_TON_MAINNET, { complete: true, transactions: [{ ...credit, parent: null }] }).jettonCredits).toEqual([
-      { jettonWallet: child.account, amount: 9_000n, from: TonWallet.fromMnemonic(MNEMONIC).address },
+      {
+        jettonWallet: child.account,
+        amount: 9_000n,
+        from: TonWallet.fromMnemonic(MNEMONIC).address,
+        senderJettonWallet: (child.inMsg as TonTraceMessage).source,
+        transaction: child.hash,
+      },
     ]);
   });
 });

@@ -1,4 +1,4 @@
-import type { Cell } from '@ton/core';
+import { type Cell, SendMode } from '@ton/core';
 import { signVerify } from '@ton/crypto';
 
 import {
@@ -12,23 +12,34 @@ import {
 import { ChainType } from '../chain_type.ts';
 import { ChainError, ChainErrorKinds } from '../errors.ts';
 import { NetworkType } from '../network_type.ts';
+import { AssetBalanceChange, type NestedBalanceChanges } from '../transaction_status.ts';
 import type { AbstractSignedMessage } from '../wallet.base.ts';
 import { TonAddress, tonRawAddress } from './ton_address.ts';
 import { TonAsset } from './ton_asset.ts';
-import { TonSignedMessage, tonCommentBody, tonJettonTransferBody, tonMessageHash, tonW5RequestFields } from './ton_messages.ts';
+import { type TonJettonMetadata, type TonMetadataFetcher, readTonJettonMetadata } from './ton_jetton_metadata.ts';
+import {
+  TON_JETTON_TRANSFER_OP,
+  TonSignedMessage,
+  tonCommentBody,
+  tonJettonTransferBody,
+  tonMessageHash,
+  tonW5RequestFields,
+} from './ton_messages.ts';
 import {
   type TonAccountState,
   TonBroadcastUncertainError,
   TonFallbackProvider,
   type TonHttpEndpoint,
+  type TonJettonWalletData,
   type TonProvider,
   TonProviderError,
   type TonTrace,
+  type TonTraceMessage,
   assertTonTxHash,
 } from './ton_provider.ts';
 import { ToncenterProvider } from './ton_toncenter.ts';
 import { TonapiProvider } from './ton_tonapi.ts';
-import { type TonTraceSummary, TonTransactionStatus, summarizeTonTrace } from './ton_transaction_status.ts';
+import { type TonJettonCredit, type TonTraceSummary, TonTransactionStatus, summarizeTonTrace } from './ton_transaction_status.ts';
 import { TonSignedTransaction, TonUnsignedTransaction, tonExternalBocHash } from './ton_transactions.ts';
 
 /** TON a jetton transfer carries to the sender's jetton wallet; the excess returns to `responseDestination`. */
@@ -72,6 +83,20 @@ export interface TonChainInit {
   tonapi?: TonProviderEndpoint | null;
   /** Replaces both, e.g. in tests. */
   provider?: TonProvider;
+  /** Fetches a jetton's off-chain metadata JSON (https); replaceable, e.g. in tests. */
+  fetchMetadata?: TonMetadataFetcher;
+}
+
+/** A transfer, with TON's own options; see `TonChain.createTransferUnsignedTransaction`. */
+export interface TonTransferOptions extends CreateTransferRequest {
+  /** Overrides the message's bounce flag. */
+  bounce?: boolean;
+  /** Overrides the send mode. */
+  sendMode?: number;
+  /** Jetton transfers: TON attached to the sender's jetton wallet. */
+  jettonAttachedNanoton?: bigint;
+  /** Jetton transfers: TON forwarded to the recipient with the transfer notification. */
+  forwardTonAmountNanoton?: bigint;
 }
 
 export interface TonGetTransactionStatusOpts extends GetTransactionStatusOpts {
@@ -91,6 +116,7 @@ export interface TonEmulationResult extends TonTraceSummary {
  */
 export class TonChain extends Chain {
   readonly #init: TonChainInit;
+  readonly #jettons = new Map<string, TonAsset>();
   #provider: TonProvider | null;
   private readonly _nativeAsset: TonAsset;
 
@@ -130,12 +156,26 @@ export class TonChain extends Chain {
     return this._nativeAsset;
   }
 
+  get nativeAsset(): TonAsset {
+    return this._nativeAsset;
+  }
+
   getWalletExplorerUrl(address: string): string {
     return `${this.explorerBaseUrl}/${new TonAddress(address).toUserFriendly({ bounceable: false })}`;
   }
 
+  /** A jetton master is a contract, so its link uses the bounceable (`EQ…`) form. */
   getTokenExplorerUrl(tokenIdentifier?: string): string {
-    return tokenIdentifier === undefined ? this.explorerBaseUrl : this.getWalletExplorerUrl(tokenIdentifier);
+    if (tokenIdentifier === undefined) return this.explorerBaseUrl;
+    return `${this.explorerBaseUrl}/${new TonAddress(tokenIdentifier).toUserFriendly({ bounceable: true })}`;
+  }
+
+  /** `null` for native TON. */
+  getAssetExplorerUrl(asset: TonAsset): string | null {
+    if (!(asset instanceof TonAsset)) {
+      throw new ChainError(ChainErrorKinds.InvalidArgument, `Invalid asset ${String(asset)}, expected TonAsset`, { chainId: this.chainId });
+    }
+    return asset.jettonMaster === null ? null : this.getTokenExplorerUrl(asset.jettonMaster);
   }
 
   getTransactionExplorerUrl(txHash: string): string {
@@ -167,6 +207,49 @@ export class TonChain extends Chain {
     return this.provider.getSeqno(tonRawAddress(address));
   }
 
+  /**
+   * Native TON for no identifier; otherwise the jetton whose master
+   * `identifier` names, its symbol and decimals read from its TEP-64
+   * metadata ({@link getJettonMetadata}). Resolved jettons are kept for the
+   * chain's lifetime.
+   */
+  async resolveAsset(identifier: string | null | undefined): Promise<TonAsset> {
+    if (identifier === null || identifier === undefined) return this._nativeAsset;
+    const master = tonRawAddress(identifier);
+    const known = this.#jettons.get(master);
+    if (known !== undefined) return known;
+    const metadata = await this.getJettonMetadata(master);
+    // As Python does: a jetton whose metadata names no symbol is called by its address's first characters.
+    const symbol = metadata.symbol ?? new TonAddress(master).toUserFriendly({ bounceable: true }).slice(0, 4);
+    const asset = new TonAsset(this.chainId, symbol, master, metadata.decimals);
+    this.#jettons.set(master, asset);
+    return asset;
+  }
+
+  /**
+   * A jetton's TEP-64 metadata: the master's `get_jetton_data` content, and the
+   * off-chain JSON its URI names (https) for what the content lacks. Throws
+   * `InvalidTokenIdentifier` for anything that is not a jetton master, and
+   * (retryably) when the decimals cannot be read.
+   */
+  async getJettonMetadata(jettonMaster: string): Promise<TonJettonMetadata> {
+    return readTonJettonMetadata(await this.provider.getJettonContent(tonRawAddress(jettonMaster)), this.#init.fetchMetadata);
+  }
+
+  createAsset(symbol: string, identifier: string | null | undefined, decimals: number): TonAsset {
+    if (identifier === null || identifier === undefined) {
+      if (symbol !== 'TON' || decimals !== TonAsset.NATIVE_DECIMALS) {
+        throw new ChainError(ChainErrorKinds.InvalidArgument, `Native TON is TON with ${TonAsset.NATIVE_DECIMALS} decimals`, { chainId: this.chainId });
+      }
+      return this._nativeAsset;
+    }
+    return this.getJettonAsset(symbol, identifier, decimals);
+  }
+
+  getJettonAsset(symbol: string, jettonMaster: string, decimals: number): TonAsset {
+    return new TonAsset(this.chainId, symbol, jettonMaster, decimals);
+  }
+
   /** The jetton wallet `owner` has (or will have) for `jettonMaster`, raw. */
   getJettonWalletAddress(jettonMaster: string, owner: string): Promise<string> {
     return this.provider.getJettonWalletAddress(tonRawAddress(jettonMaster), tonRawAddress(owner));
@@ -180,54 +263,67 @@ export class TonChain extends Chain {
 
   /**
    * A transfer from `from`: native TON (with `memo` as a text comment), or a
-   * jetton through the sender's jetton wallet with
-   * {@link DEFAULT_JETTON_TRANSFER_ATTACHED_NANOTON} attached and the excess
-   * returned to the sender.
+   * jetton through the sender's jetton wallet, the excess returned to the
+   * sender. `amountHr` takes the jetton's decimals from its metadata.
+   *
+   * - `isFullBalance`: native TON sends everything the wallet holds (send mode
+   *   128 + 2, value 0); a jetton sends the jetton wallet's whole balance.
+   * - Native `bounce`, unless given: only to a bounceable (`EQ…`) address
+   *   that is deployed — a contract that fails then returns the TON, and a
+   *   wallet not deployed yet still receives it, as TON wallets send.
+   * - Jetton transfers are always bounceable unless `bounce` says otherwise,
+   *   carry {@link DEFAULT_JETTON_TRANSFER_ATTACHED_NANOTON} and forward
+   *   {@link DEFAULT_JETTON_FORWARD_NANOTON}; `jettonAttachedNanoton`,
+   *   `forwardTonAmountNanoton` and `sendMode` override.
    */
-  async createTransferUnsignedTransaction(req: CreateTransferRequest): Promise<TonUnsignedTransaction> {
+  async createTransferUnsignedTransaction(req: TonTransferOptions): Promise<TonUnsignedTransaction> {
     if (req.from === undefined) {
       throw new ChainError(ChainErrorKinds.InvalidArgument, 'TON transfers need `from`', { chainId: this.chainId });
     }
     if (req.gasPricing !== undefined) {
       throw new ChainError(ChainErrorKinds.InvalidArgument, 'TON transfers take no gasPricing', { chainId: this.chainId });
     }
-    const jettonMaster = req.tokenIdentifier;
-    if (jettonMaster !== undefined && req.amount === undefined) {
-      throw new ChainError(
-        ChainErrorKinds.InvalidArgument,
-        'Jetton transfers take `amount` in the jetton smallest unit; the SDK does not read jetton metadata',
-        { chainId: this.chainId },
-      );
-    }
-    // A jetton's decimals only matter for `amountHr`, which was just refused.
-    const resolved = resolveTransferAmount(req, jettonMaster === undefined ? TonAsset.NATIVE_DECIMALS : 0);
-    if (resolved.kind === 'full') {
-      throw new ChainError(ChainErrorKinds.FeatureNotSupported, 'TON transfers take an exact amount', { chainId: this.chainId });
-    }
+    const from = req.from;
     const comment = req.memo === undefined ? undefined : tonCommentBody(req.memo);
+    const jettonMaster = req.tokenIdentifier;
     if (jettonMaster === undefined) {
+      const resolved = resolveTransferAmount(req, TonAsset.NATIVE_DECIMALS);
+      const full = resolved.kind === 'full';
       return new TonUnsignedTransaction({
         chainId: this.chainId,
-        walletAddress: req.from,
-        // The destination's own form says whether it may bounce: `EQ…` asks for
-        // a refund if it fails, `UQ…` (and the flagless raw form) does not —
-        // the form for an address with no wallet deployed yet.
-        messages: [{ to: req.to, value: resolved.amountMr, body: comment, bounce: new TonAddress(req.to).isBounceable ?? false }],
+        walletAddress: from,
+        messages: [
+          {
+            to: req.to,
+            value: full ? 0n : resolved.amountMr,
+            body: comment,
+            bounce: req.bounce ?? (await this.bouncesByDefault(req.to)),
+            mode: req.sendMode ?? (full ? SendMode.CARRY_ALL_REMAINING_BALANCE | SendMode.IGNORE_ERRORS : undefined),
+          },
+        ],
       });
+    }
+    // Only a human-readable amount needs the jetton's decimals, and so its metadata.
+    const decimals = req.amountHr === undefined ? 0 : (await this.resolveAsset(jettonMaster)).decimals;
+    const resolved = resolveTransferAmount(req, decimals);
+    const amount = resolved.kind === 'full' ? await this.getBalance(from, jettonMaster) : resolved.amountMr;
+    if (amount === 0n) {
+      throw new ChainError(ChainErrorKinds.InsufficientFunds, `${from} holds none of ${jettonMaster}`, { chainId: this.chainId });
     }
     return new TonUnsignedTransaction({
       chainId: this.chainId,
-      walletAddress: req.from,
+      walletAddress: from,
       messages: [
         {
-          to: await this.getJettonWalletAddress(jettonMaster, req.from),
-          value: DEFAULT_JETTON_TRANSFER_ATTACHED_NANOTON,
-          bounce: true,
+          to: await this.getJettonWalletAddress(jettonMaster, from),
+          value: req.jettonAttachedNanoton ?? DEFAULT_JETTON_TRANSFER_ATTACHED_NANOTON,
+          bounce: req.bounce ?? true,
+          mode: req.sendMode,
           body: tonJettonTransferBody({
-            amount: resolved.amountMr,
+            amount,
             destination: req.to,
-            responseDestination: req.from,
-            forwardTonAmount: DEFAULT_JETTON_FORWARD_NANOTON,
+            responseDestination: from,
+            forwardTonAmount: req.forwardTonAmountNanoton ?? DEFAULT_JETTON_FORWARD_NANOTON,
             forwardPayload: comment,
           }),
         },
@@ -243,7 +339,9 @@ export class TonChain extends Chain {
    */
   async emulate(boc: string): Promise<TonEmulationResult> {
     const trace = await this.provider.emulate(boc);
-    return { trace, ...summarizeTonTrace(this.chainId, trace) };
+    const summary = summarizeTonTrace(this.chainId, trace);
+    await this.addJettonBalanceChanges(trace, summary.jettonCredits, summary.balanceChanges);
+    return { trace, ...summary };
   }
 
   /**
@@ -354,6 +452,12 @@ export class TonChain extends Chain {
     });
   }
 
+  /** Native TON bounces only to a bounceable (`EQ…`) address that is deployed. */
+  private async bouncesByDefault(to: string): Promise<boolean> {
+    if (new TonAddress(to).isBounceable !== true) return false;
+    return (await this.getAccountState(to)).status === 'active';
+  }
+
   private assertTxHash(hash: string): void {
     try {
       assertTonTxHash(hash);
@@ -405,12 +509,70 @@ export class TonChain extends Chain {
     this.assertTxHash(hash);
     const trace = await this.provider.getTrace(hash);
     const masterchainTip = trace === null ? 0 : (await this.provider.getMasterchainHead()).seqno;
-    return TonTransactionStatus.fromTrace({
+    const status = TonTransactionStatus.fromTrace({
       chainId: this.chainId,
       trace,
       masterchainTip,
       minMasterchainDepth: opts.minMasterchainDepth,
     });
+    if (trace !== null && status.balanceChanges !== null) await this.addJettonBalanceChanges(trace, status.jettonCredits, status.balanceChanges);
+    return status;
+  }
+
+  /**
+   * Adds the jetton balance changes of the trace's wallet-to-wallet jetton
+   * transfers (TEP-74 \`transfer\` → \`internal_transfer\`) to
+   * \`balanceChanges\`: the sending owner loses the amount and the recipient
+   * gains it, in the jetton's asset ({@link resolveAsset}).
+   *
+   * A transfer counts only once its master vouches for both jetton wallets:
+   * the sender's must be the master's wallet for the owner it reports, and
+   * the receiving one the master's wallet for the recipient the transfer
+   * named. Anything else — a contract posing as a jetton wallet, a mint or a
+   * burn — moves no balance here.
+   */
+  private async addJettonBalanceChanges(trace: TonTrace, credits: readonly TonJettonCredit[], balanceChanges: NestedBalanceChanges): Promise<void> {
+    const byHash = new Map(trace.transactions.map((tx) => [tx.hash, tx]));
+    const walletData = new Map<string, Promise<TonJettonWalletData | null>>();
+    const walletOf = new Map<string, Promise<string>>();
+    const dataOf = (wallet: string): Promise<TonJettonWalletData | null> => {
+      if (!walletData.has(wallet)) walletData.set(wallet, this.provider.getJettonWalletData(wallet));
+      return walletData.get(wallet) as Promise<TonJettonWalletData | null>;
+    };
+    const walletAddressOf = (master: string, owner: string): Promise<string> => {
+      const key = `${master}|${owner}`;
+      if (!walletOf.has(key)) walletOf.set(key, this.provider.getJettonWalletAddress(master, owner));
+      return walletOf.get(key) as Promise<string>;
+    };
+    for (const credit of credits) {
+      const received = byHash.get(credit.transaction);
+      const sender = received?.parent === null || received?.parent === undefined ? undefined : byHash.get(received.parent);
+      const recipient = sender?.inMsg === null || sender?.inMsg === undefined ? null : jettonTransferDestinationOf(sender.inMsg);
+      if (credit.senderJettonWallet === null || sender === undefined || recipient === null) continue;
+      const data = await dataOf(credit.senderJettonWallet);
+      if (data === null) continue;
+      const [senderWallet, recipientWallet] = await Promise.all([
+        walletAddressOf(data.jettonMaster, data.owner),
+        walletAddressOf(data.jettonMaster, recipient),
+      ]);
+      if (senderWallet !== credit.senderJettonWallet || recipientWallet !== credit.jettonWallet) continue;
+      const asset = await this.resolveAsset(data.jettonMaster);
+      AssetBalanceChange.upsert(balanceChanges, data.owner, asset, AssetBalanceChange.fromMr(-credit.amount, asset.decimals));
+      AssetBalanceChange.upsert(balanceChanges, recipient, asset, AssetBalanceChange.fromMr(credit.amount, asset.decimals));
+    }
+  }
+}
+
+/** The recipient owner a jetton \`transfer\` names, raw; \`null\` for any other message. */
+function jettonTransferDestinationOf(message: TonTraceMessage): string | null {
+  if (message.opcode !== TON_JETTON_TRANSFER_OP || message.body === null) return null;
+  try {
+    const slice = message.body.beginParse();
+    slice.skip(32 + 64);
+    slice.loadCoins();
+    return slice.loadAddress().toRawString();
+  } catch {
+    return null;
   }
 }
 

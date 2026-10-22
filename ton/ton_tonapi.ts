@@ -5,6 +5,7 @@ import { tonRawAddress } from './ton_address.ts';
 import {
   type TonAccountState,
   type TonHttpEndpoint,
+  type TonJettonWalletData,
   type TonMasterchainHead,
   type TonProvider,
   type TonTransactionPhases,
@@ -21,6 +22,8 @@ import {
   assertTraceOf,
   definiteError,
   errorMessageOf,
+  jettonWalletDataOf,
+  stackCellOf,
   tonBroadcastReply,
   tonTransactionOutcome,
   tonHttpJson,
@@ -92,6 +95,30 @@ export class TonapiProvider implements TonProvider {
     const first = stack[0] === undefined ? null : asRecord(stack[0], 'stack item');
     if (first === null || first.type !== 'num') throw definiteError(ChainErrorKinds.RpcError, `${NAME} returned no jetton balance`);
     return asBigInt(first.num, 'jetton balance');
+  }
+
+  async getJettonContent(jettonMaster: string): Promise<Cell> {
+    const reply = await this.get(this.getMethodPath(jettonMaster, 'get_jetton_data', []));
+    const result = reply === null ? null : asRecord(reply, 'get_jetton_data');
+    if (result === null || result.success !== true || Number(result.exit_code ?? 0) !== 0) {
+      throw definiteError(ChainErrorKinds.InvalidTokenIdentifier, `${jettonMaster} is not a jetton master`);
+    }
+    return stackCellOf((Array.isArray(result.stack) ? result.stack : [])[3], 'jetton content');
+  }
+
+  /** `null` only for a jetton wallet with no code, confirmed by the account state as for the balance. */
+  async getJettonWalletData(jettonWallet: string): Promise<TonJettonWalletData | null> {
+    const reply = await this.get(this.getMethodPath(jettonWallet, 'get_wallet_data', []));
+    const result = reply === null ? null : asRecord(reply, 'get_wallet_data');
+    if (result === null || (result.success !== true && Number(result.exit_code) === NO_CODE_EXIT_CODE)) {
+      const state = await this.getAccountState(jettonWallet);
+      if (state.status === 'nonexist' || state.status === 'uninit') return null;
+      throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} could not run get_wallet_data on ${jettonWallet}, which is ${state.status}`, true);
+    }
+    if (result.success !== true || Number(result.exit_code ?? 0) !== 0) {
+      throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} could not run get_wallet_data on ${jettonWallet}`, true);
+    }
+    return jettonWalletDataOf(result.stack);
   }
 
   async sendBoc(boc: string): Promise<void> {

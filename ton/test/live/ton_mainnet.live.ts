@@ -1,7 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { parseEnv } from 'node:util';
 
-import { SendMode } from '@ton/core';
+import { type Cell, SendMode } from '@ton/core';
+import { Decimal } from 'decimal.js';
 
 import { CHAIN_ID_TON_MAINNET } from '../../../chain_ids.ts';
 import { ChainErrorKinds } from '../../../errors.ts';
@@ -24,6 +25,8 @@ import {
   writeRecordings,
 } from '../ton_recordings.ts';
 import { USDT_MASTER } from '../ton_test_helpers.ts';
+import { tonUserFriendlyAddress } from '../../ton_address.ts';
+import { TON_USDT } from '../../ton_assets.ts';
 
 /**
  * TON mainnet, for real: `npm run test:live:ton`. Never run by `npm test`.
@@ -282,6 +285,18 @@ describe('TON mainnet (live)', () => {
     expect(await chain.getJettonWalletAddress(USDT_MASTER, feePayer.address)).toBe(fromToncenter);
     expect((await chain.getAccountState(fromToncenter as string)).status).toBe('nonexist');
     expect(await chain.getBalance(feePayer.address, USDT_MASTER)).toBe(0n);
+  });
+
+  it("resolves USDT from its TEP-64 metadata, alike on both providers, and prices a transfer in its decimals", async () => {
+    const usdt = await chain.resolveAsset(tonUserFriendlyAddress(USDT_MASTER, { bounceable: true }));
+    expect(usdt).toMatchObject({ symbol: TON_USDT.symbol, decimals: TON_USDT.decimals, jettonMaster: USDT_MASTER });
+    const [fromToncenter, fromTonapi] = await Promise.all(providers.map((p) => p.getJettonContent(USDT_MASTER)));
+    expect(fromTonapi.hash().equals(fromToncenter.hash())).toBe(true);
+    const transfer = await chain.createTransferUnsignedTransaction({ from: feePayer.address, to: feePayer.address, tokenIdentifier: USDT_MASTER, amountHr: new Decimal('0.25') });
+    const body = (transfer.messages[0].body as Cell).beginParse();
+    body.skip(32 + 64);
+    expect(body.loadCoins()).toBe(250_000n);
+    expect(chain.getAssetExplorerUrl(usdt)).toBe(`${chain.explorerBaseUrl}/${tonUserFriendlyAddress(USDT_MASTER, { bounceable: true })}`);
   });
 
   it('emulates a relay that deploys a fresh vault (AC3)', async () => {

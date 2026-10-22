@@ -15,12 +15,17 @@ import { TON_JETTON_INTERNAL_TRANSFER_OP, TON_JETTON_TRANSFER_OP, TON_W5_SIGNED_
 import { type TonTrace, type TonTraceMessage, type TonTraceTransaction, assertTraceConsistent } from './ton_provider.ts';
 
 /** Jettons a jetton wallet received in a trace (a TEP-74 `internal_transfer` it accepted). */
+/** Jettons a jetton wallet accepted (`internal_transfer`), read from the trace alone — not yet checked against any master. */
 export interface TonJettonCredit {
   /** The receiving jetton wallet, raw. */
   jettonWallet: string;
   amount: bigint;
   /** The previous owner the transfer names, raw. */
   from: string | null;
+  /** The jetton wallet that sent them, raw. */
+  senderJettonWallet: string | null;
+  /** The receiving transaction. */
+  transaction: string;
 }
 
 /** What happened to one message a wallet sent. */
@@ -107,7 +112,8 @@ export function summarizeTonTrace(chainId: number, trace: TonTrace): TonTraceSum
       debit += out.value + out.fwdFee;
     }
     add(tx.account, -debit);
-    const credit = tx.success && tx.inMsg !== null ? jettonCreditOf(tx.account, tx.inMsg) : null;
+    // Accepted unless the jetton wallet's transaction aborted; a refund it then skipped does not undo the credit.
+    const credit = !tx.aborted && tx.inMsg !== null ? jettonCreditOf(tx, tx.inMsg) : null;
     if (credit !== null) jettonCredits.push(credit);
   }
 
@@ -238,14 +244,20 @@ function childrenByParent(transactions: readonly TonTraceTransaction[]): Map<str
   return byParent;
 }
 
-function jettonCreditOf(account: string, inMsg: TonTraceMessage): TonJettonCredit | null {
+function jettonCreditOf(tx: TonTraceTransaction, inMsg: TonTraceMessage): TonJettonCredit | null {
   if (inMsg.opcode !== TON_JETTON_INTERNAL_TRANSFER_OP || inMsg.bounced || inMsg.body === null) return null;
   try {
     const slice = (inMsg.body as Cell).beginParse();
     slice.skip(32 + 64);
     const amount = slice.loadCoins();
     const from = slice.loadMaybeAddress();
-    return { jettonWallet: account, amount, from: from === null ? null : from.toRawString() };
+    return {
+      jettonWallet: tx.account,
+      amount,
+      from: from === null ? null : from.toRawString(),
+      senderJettonWallet: inMsg.source,
+      transaction: tx.hash,
+    };
   } catch {
     return null;
   }
