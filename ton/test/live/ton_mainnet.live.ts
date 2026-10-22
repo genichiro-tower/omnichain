@@ -473,59 +473,95 @@ describe('TON mainnet (live)', () => {
     expect(() => walletAt(env.feePayerAccount + 1, version).createInternalRequest({ seqno: 0, messages: [{ to: feePayer.address, value: 1n }] })).toThrow(/W5/);
   });
 
-  (env.send ? it.each(['v4r2', 'v3r2'] as const) : it.skip.each(['v4r2', 'v3r2'] as const))(
-    'deploys a %s wallet that sends everything back, and refuses a resend',
-    async (version) => {
-      let wallet: TonWallet | null = null;
-      for (let account = env.feePayerAccount + 1; account < env.feePayerAccount + 50 && wallet === null; account++) {
-        const candidate = walletAt(account, version);
-        if ((await chain.getAccountState(candidate.address)).status === 'nonexist') wallet = candidate;
-      }
-      if (wallet === null) throw new Error(`no unused ${version} wallet within 50 accounts`);
-      // Funded from the fee payer, to the non-bounceable form: the wallet is not deployed yet.
-      const fund = await chain.createTransferUnsignedTransaction({ from: feePayer.address, to: wallet.addressUserFriendly({ bounceable: false }), amount: ATTACHED });
-      const funding = await feePayer.signTransaction(fund, chain);
-      await chain.broadcast(funding.boc);
-      expect((await finalStatusRecorded(`${version}_funded`, `the fee payer funding a fresh ${version} wallet`, funding.txHash)).status).toBe(
-        TransactionStatusTypes.Success,
-      );
-      // The wallet deploys itself and sends part back, keeping enough to run a resend.
-      const partial = await chain.createTransferUnsignedTransaction({ from: wallet.address, to: feePayer.addressUserFriendly({ bounceable: false }), amount: ATTACHED / 2n });
-      const signed = await wallet.signTransaction(partial, chain);
-      expect(signed.seqno).toBe(0);
-      expect((await chain.emulate(signed.boc)).success).toBe(true);
-      await chain.broadcast(signed.boc);
-      console.log(`sent ${signed.txHash} (${version} deploys and sends half back)`);
-      const status = await finalStatusRecorded(`${version}_deploy_send`, `a fresh ${version} wallet deploying itself and sending half back`, signed.txHash);
-      expect(status.status).toBe(TransactionStatusTypes.Success);
-      expect((await chain.getAccountState(wallet.address)).status).toBe('active');
-      expect(await chain.getSeqno(wallet.address)).toBe(1);
-      await expect(chain.getRequestState({ wallet: wallet.address, seqno: signed.seqno, validUntil: signed.validUntil, hash: signed.txHash })).resolves.toBe(
-        'consumed',
-      );
-      // Resent while the wallet can pay to run it: the v3r2 / v4r2 seqno check (33) refuses it.
-      const resent = await toncenter.sendBoc(signed.boc).then(() => null, (e: unknown) => e);
-      console.log(`${version} resend: ${(resent as Error | null)?.message.slice(0, 200) ?? 'accepted'}`);
-      if (resent !== null) expect(resent).toMatchObject({ kind: ChainErrorKinds.NonceTooLow });
-      expect(await chain.getSeqno(wallet.address)).toBe(1);
+  /** A fresh wallet of `version` at the first unused account index above the fee payer. */
+  async function freshWallet(version: TonWalletVersion): Promise<TonWallet> {
+    for (let account = env.feePayerAccount + 1; account < env.feePayerAccount + 50; account++) {
+      const candidate = walletAt(account, version);
+      if ((await chain.getAccountState(candidate.address)).status === 'nonexist') return candidate;
+    }
+    throw new Error(`no unused ${version} wallet within 50 accounts`);
+  }
 
-      // Then everything back (send mode 128 + 2), leaving the wallet empty.
-      const sweep = await wallet.signTransaction(
-        await chain.createTransferUnsignedTransaction({ from: wallet.address, to: feePayer.addressUserFriendly({ bounceable: false }), isFullBalance: true }),
-        chain,
-      );
-      expect(sweep.seqno).toBe(1);
-      await chain.broadcast(sweep.boc);
-      expect((await finalStatusRecorded(`${version}_sweep`, `the ${version} wallet sending everything back`, sweep.txHash)).status).toBe(
-        TransactionStatusTypes.Success,
-      );
-      // An emptied wallet refuses to even run a resend: possibly landed, never definite.
-      const toEmpty = await toncenter.sendBoc(sweep.boc).then(() => null, (e: unknown) => e);
-      console.log(`${version} resend to the emptied wallet: ${(toEmpty as Error | null)?.message.slice(0, 200) ?? 'accepted'}`);
-      if (toEmpty !== null) expect(toEmpty).toBeInstanceOf(TonBroadcastUncertainError);
-      expect(await chain.getSeqno(wallet.address)).toBe(2);
-    },
-  );
+  const lifecycles: Array<[string, () => Promise<TonWallet>]> = [
+    ['W5, fresh at a path', () => freshWallet('v5r1')],
+    ['v4r2, fresh at a path', () => freshWallet('v4r2')],
+    ['v3r2, fresh at a path', () => freshWallet('v3r2')],
+    // TON's own scheme, the Python SDK's account: one per mnemonic, so it is fresh only on the first run.
+    ['W5 with no path (the Python SDK scheme)', async () => TonWallet.fromMnemonic(env.mnemonic)],
+  ];
+
+  /*
+   * Every kind of wallet, on mainnet, paying its own way: funded by the fee
+   * payer, it deploys itself with its first request (when new) and sends part
+   * back, sends a USDT transfer to its own jetton wallet (no code: bounced,
+   * AC6), refuses a resend of the landed request while it can pay to run it
+   * (seqno: NonceTooLow), sends everything back, and refuses a resend once
+   * emptied (before execution: uncertain). Costs fees only.
+   */
+  (env.send ? it.each(lifecycles) : it.skip.each(lifecycles))('runs a %s wallet on its own requests', async (label, walletOf) => {
+    const wallet = await walletOf();
+    const name = `${wallet.version}_${label.includes('no path') ? 'native' : 'path'}`;
+    const startSeqno = await chain.getSeqno(wallet.address);
+    console.log(`${label}: ${wallet.addressUserFriendly({ bounceable: false })}, seqno ${startSeqno}`);
+    const pay = (to: TonWallet): string => to.addressUserFriendly({ bounceable: false });
+
+    // Funded to the non-bounceable form: the wallet may not be deployed yet.
+    const funding = await feePayer.signTransaction(await chain.createTransferUnsignedTransaction({ from: feePayer.address, to: pay(wallet), amount: ATTACHED }), chain);
+    await chain.broadcast(funding.boc);
+    expect((await finalStatusRecorded(`${name}_funded`, `the fee payer funding a ${label} wallet`, funding.txHash)).status).toBe(TransactionStatusTypes.Success);
+
+    // Its own request: deploys it when new, and sends part back.
+    const partial = await wallet.signTransaction(
+      await chain.createTransferUnsignedTransaction({ from: wallet.address, to: pay(feePayer), amount: ATTACHED / 5n }),
+      chain,
+    );
+    expect(partial.seqno).toBe(startSeqno);
+    expect((await chain.emulate(partial.boc)).success).toBe(true);
+    await chain.broadcast(partial.boc);
+    console.log(`sent ${partial.txHash} (${label}: ${startSeqno === 0 ? 'deploys and sends' : 'sends'} part back)`);
+    expect((await finalStatusRecorded(`${name}_send`, `a ${label} wallet's own request`, partial.txHash)).status).toBe(TransactionStatusTypes.Success);
+    expect((await chain.getAccountState(wallet.address)).status).toBe('active');
+    expect(await chain.getSeqno(wallet.address)).toBe(startSeqno + 1);
+    await expect(chain.getRequestState({ wallet: wallet.address, seqno: partial.seqno, validUntil: partial.validUntil, hash: partial.txHash })).resolves.toBe(
+      'consumed',
+    );
+
+    // A USDT transfer to its own jetton wallet, which has no code: bounced (AC6).
+    const jetton = await wallet.signTransaction(
+      await chain.createTransferUnsignedTransaction({
+        from: wallet.address,
+        to: wallet.address,
+        tokenIdentifier: USDT_MASTER,
+        amount: 1n,
+        jettonAttachedNanoton: ATTACHED / 5n,
+      }),
+      chain,
+    );
+    await chain.broadcast(jetton.boc);
+    const bounced = await finalStatusRecorded(`${name}_jetton_bounced`, `a ${label} wallet's USDT transfer to a jetton wallet with no code`, jetton.txHash);
+    expect(bounced.status).toBe(TransactionStatusTypes.Failed);
+    expect(bounced.error?.code).toBe('bounced');
+
+    // Resent while it can pay to run it: the seqno check refuses it.
+    const resent = await toncenter.sendBoc(partial.boc).then(() => null, (e: unknown) => e);
+    console.log(`${label} resend: ${(resent as Error | null)?.message.slice(0, 120) ?? 'accepted'}`);
+    if (resent !== null) expect(resent).toMatchObject({ kind: ChainErrorKinds.NonceTooLow });
+
+    // Everything back (send mode 128 + 2), leaving it empty.
+    const sweep = await wallet.signTransaction(
+      await chain.createTransferUnsignedTransaction({ from: wallet.address, to: pay(feePayer), isFullBalance: true }),
+      chain,
+    );
+    expect(sweep.seqno).toBe(startSeqno + 2);
+    await chain.broadcast(sweep.boc);
+    expect((await finalStatusRecorded(`${name}_sweep`, `a ${label} wallet sending everything back`, sweep.txHash)).status).toBe(TransactionStatusTypes.Success);
+
+    // An emptied wallet refuses even to run a resend: possibly landed, never definite.
+    const toEmpty = await toncenter.sendBoc(sweep.boc).then(() => null, (e: unknown) => e);
+    console.log(`${label} resend to the emptied wallet: ${(toEmpty as Error | null)?.message.slice(0, 120) ?? 'accepted'}`);
+    if (toEmpty !== null) expect(toEmpty).toBeInstanceOf(TonBroadcastUncertainError);
+    expect(await chain.getSeqno(wallet.address)).toBe(startSeqno + 3);
+  });
 
   (env.send ? it : it.skip)('spent no more than the cap', async () => {
     const spent = startBalance - (await chain.getAccountState(feePayer.address)).balance;

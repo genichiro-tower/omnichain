@@ -292,7 +292,7 @@ afterwards whether it did.
     `bounced`, value back to the fee payer;
   - the run spent 0.0029 TON; the replies are recorded and replayed under
     `npm test`.
-- The live suite (18 tests) also checks both providers against each other:
+- The live suite (24 tests) also checks both providers against each other:
   the masterchain head, emulation and the sent trace alike (both passing the
   trace check), `getRequestState` on a request never sent (`expired` /
   `live`) and on one that landed (`consumed`), a resend of a landed message
@@ -302,9 +302,10 @@ afterwards whether it did.
   AC6 (a jetton transfer bounced by a jetton wallet with no code), and the
   paid fees within a fifth of the emulated ones (equal on the last run),
   and USDT resolved from its TEP-64 metadata (`USD₮`, 6) alike on both
-  providers with a transfer priced in its decimals. Last run 2026-10-22: 18
-  passed, 0.0062 TON; 17 recorded scenarios.
-- 1923 tests pass (165 for TON, the 17 recorded scenarios included).
+  providers with a transfer priced in its decimals, and every kind of wallet
+  (W5, v4r2, v3r2 at a path; W5 with no path) on its own requests. Last run
+  2026-10-22: 24 passed, 0.0163 TON; 33 recorded scenarios.
+- 1968 tests pass (the 33 recorded scenarios included).
 
 <!-- ====================== PART C - DEVIATIONS ====================== -->
 
@@ -433,8 +434,10 @@ PR: `getomnichain/omnichain#17` (`genichiro-tower:feature/ton-chain` →
   `tonRelayMessage`) is W5-only and refused for them. Their refusals follow
   their check order (33 → `NonceTooLow`; expiry 35 / 36 → uncertain), and
   "rejected before smart-contract execution" (an account that cannot pay)
-  is uncertain on every version. Verified on mainnet: a fresh v4r2 and v3r2
-  wallet each deployed, sent, swept, and refused resends both ways.
+  is uncertain on every version. Verified on mainnet for every kind of
+  wallet — a fresh W5, v4r2 and v3r2 at a path, and the no-path (Python
+  scheme) wallet: each deployed itself, sent, bounced a USDT transfer (AC6),
+  swept, and refused resends both ways.
 - **R4, signatures:** `TonChain.verifySignature(publicKey, message, sig)`
   verifies with the public key only; signatures must be exactly 128 hex.
 - The root entry exports only `TonAddress`; the family is `./ton`.
