@@ -277,9 +277,13 @@ afterwards whether it did.
 - The SLIP-0010 derivation matches the spec vectors; the normalized external
   hash matches TON Center's `hash_norm` on a real message.
 - `code-review/code_reviewer.py`: 5 rounds, round 5 has no Critical; rounds
-  6, 7 and 8 had no Critical; the double-spend Mediums of rounds 7 and 8
-  (resend after landing, fail-open reads, mixed providers in expiry, replay
-  of a failed relayed request) are fixed.
+  6–8 and 10–11 had no Critical; round 9's (a message signature usable as
+  a W5 request signature) is fixed. The double-spend and fail-open Mediums
+  of rounds 7–11 are fixed: resend after landing, fail-open reads (seqno,
+  account state, phases, jetton balance), mixed providers in expiry, replay
+  of a failed relayed request, provider gaps, request state, lost
+  seqno/validUntil, unchecked hashes, bounce by address form, lenient
+  signature parsing.
 - AC3 and AC4 on mainnet (`npm run test:live:ton`, 2026-10-21, fee payer
   `UQBCC5glBygg10SwcXZdY4Ssd6NgCNcm0qZLrQaVw4sPsQfx`):
   - a relay deploying a fresh vault emulated and sent (`f090af72…`): Success,
