@@ -56,6 +56,10 @@ export function deriveTonEd25519Seed(bip39Seed: Uint8Array, index: number): Buff
 }
 
 export const TON_WALLET_VERSIONS: readonly TonWalletVersion[] = ['v3r2', 'v4r2', 'v5r1'];
+/** The workchains a wallet can live on: the basechain (0) and the masterchain (-1). */
+export type TonWorkchain = 0 | -1;
+/** The v3r2 / v4r2 wallet id the Python SDK uses on both workchains. */
+export const TON_LEGACY_DEFAULT_WALLET_ID = 698983191;
 /** v3r2 / v4r2 send at most four messages per request. */
 export const TON_LEGACY_MAX_MESSAGES = 4;
 
@@ -108,11 +112,13 @@ export class TonWallet extends AbstractBip32StyleSingleAccountWallet {
   readonly publicKey: Buffer;
   /** The wallet contract: W5 (v5r1, the default), or v4r2 / v3r2 as the Python SDK builds them. */
   readonly version: TonWalletVersion;
+  /** 0 (the basechain, the default) or -1 (the masterchain, where gas and storage cost far more). */
+  readonly workchain: TonWorkchain;
   readonly contract: WalletContractV5R1 | WalletContractV4 | WalletContractV3R2;
   readonly #secretKey: Buffer;
   private readonly _address: string;
 
-  constructor(ed25519Seed: Uint8Array, opts: { version?: TonWalletVersion } = {}) {
+  constructor(ed25519Seed: Uint8Array, opts: { version?: TonWalletVersion; workchain?: TonWorkchain } = {}) {
     super();
     if (ed25519Seed.length !== 32) {
       throw new ChainError(ChainErrorKinds.InvalidArgument, `A TON ed25519 seed is 32 bytes, got ${ed25519Seed.length}`);
@@ -121,17 +127,26 @@ export class TonWallet extends AbstractBip32StyleSingleAccountWallet {
     if (!TON_WALLET_VERSIONS.includes(version)) {
       throw new ChainError(ChainErrorKinds.InvalidArgument, `TON wallet version must be one of ${TON_WALLET_VERSIONS.join(', ')}, got ${String(version)}`);
     }
+    const workchain = opts.workchain ?? 0;
+    if (workchain !== 0 && workchain !== -1) {
+      throw new ChainError(ChainErrorKinds.InvalidArgument, `A TON wallet lives on workchain 0 or -1, got ${String(workchain)}`);
+    }
     const keyPair = keyPairFromSeed(Buffer.from(ed25519Seed));
     this.publicKey = keyPair.publicKey;
     this.#secretKey = keyPair.secretKey;
     this.version = version;
-    // v3r2 / v4r2 take their default wallet id (698983191 + workchain), as the Python SDK's do.
+    this.workchain = workchain;
+    // The wallet ids the Python SDK (ton_core) uses on either workchain: W5's
+    // context names workchain 0 (as @ton/ton's default does), and v3r2 /
+    // v4r2's is 698983191 whatever the wallet's workchain — where @ton/ton
+    // would add the workchain, giving another address on -1.
+    const publicKey = keyPair.publicKey;
     this.contract =
       version === 'v5r1'
-        ? WalletContractV5R1.create({ workchain: 0, publicKey: keyPair.publicKey })
+        ? WalletContractV5R1.create({ workchain, publicKey })
         : version === 'v4r2'
-          ? WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey })
-          : WalletContractV3R2.create({ workchain: 0, publicKey: keyPair.publicKey });
+          ? WalletContractV4.create({ workchain, publicKey, walletId: TON_LEGACY_DEFAULT_WALLET_ID })
+          : WalletContractV3R2.create({ workchain, publicKey, walletId: TON_LEGACY_DEFAULT_WALLET_ID });
     this._address = this.contract.address.toRawString();
   }
 
@@ -167,7 +182,7 @@ export class TonWallet extends AbstractBip32StyleSingleAccountWallet {
    */
   static fromMnemonic(
     mnemonicStr: string,
-    opts: { derivationPath?: string; passphrase?: string; version?: TonWalletVersion } = {},
+    opts: { derivationPath?: string; passphrase?: string; version?: TonWalletVersion; workchain?: TonWorkchain } = {},
   ): TonWallet {
     if (opts.derivationPath === undefined || opts.derivationPath === TON_PYTHON_MARKER_PATH) {
       if (opts.passphrase !== undefined && opts.passphrase !== '') {
@@ -176,10 +191,10 @@ export class TonWallet extends AbstractBip32StyleSingleAccountWallet {
           "TON's own mnemonic scheme takes no passphrase here (the Python SDK ignores it); pass a derivationPath to use one",
         );
       }
-      return new TonWallet(deriveTonNativeSeed(mnemonicStr), { version: opts.version });
+      return new TonWallet(deriveTonNativeSeed(mnemonicStr), { version: opts.version, workchain: opts.workchain });
     }
     const index = TonWallet.indexFromDerivationPath(opts.derivationPath);
-    return new TonWallet(deriveTonEd25519Seed(mnemonicToSeedBip39(mnemonicStr, opts.passphrase ?? ''), index), { version: opts.version });
+    return new TonWallet(deriveTonEd25519Seed(mnemonicToSeedBip39(mnemonicStr, opts.passphrase ?? ''), index), { version: opts.version, workchain: opts.workchain });
   }
 
   static derivationPath(args: { account?: number } = {}): string {

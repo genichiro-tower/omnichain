@@ -428,6 +428,11 @@ PR: `getomnichain/omnichain#17` (`genichiro-tower:feature/ton-chain` →
   path (`derivationPath({ account })`) it stays BIP-39 / SLIP-0010, for
   depositron's vaults; `m/44'/607'/0'` is that scheme's account 0, not
   Python's key.
+- **R4, workchain:** 0 (default) or -1, as the Python SDK allows, with its
+  wallet ids on both (W5 context workchain 0; v3r2 / v4r2 698983191, not
+  `@ton/ton`'s 698983191 + workchain), so -1 addresses match Python's
+  (pinned). The masterchain is about 150 times dearer; live it is emulated
+  only (funding: 0.0104 TON in fees).
 - **R4, wallet versions:** v4r2 (Python's default) and v3r2 besides W5,
   with Python's default wallet ids; external requests only (up to 4
   messages, +2 on each). Gasless relaying (`createInternalRequest`,

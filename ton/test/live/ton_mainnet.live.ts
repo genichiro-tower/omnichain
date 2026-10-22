@@ -473,6 +473,20 @@ describe('TON mainnet (live)', () => {
     expect(() => walletAt(env.feePayerAccount + 1, version).createInternalRequest({ seqno: 0, messages: [{ to: feePayer.address, value: 1n }] })).toThrow(/W5/);
   });
 
+  // The masterchain prices gas, messages and cells about 150 times higher, so it is emulated only.
+  it.each(['v5r1', 'v4r2', 'v3r2'] as const)("emulates funding a %s wallet on workchain -1", async (version) => {
+    const wallet = TonWallet.fromMnemonic(env.mnemonic, { derivationPath: TonWallet.derivationPath({ account: env.feePayerAccount + 1 }), version, workchain: -1 });
+    expect(wallet.address.startsWith('-1:')).toBe(true);
+    const funding = await feePayer.signTransaction(
+      await chain.createTransferUnsignedTransaction({ from: feePayer.address, to: wallet.addressUserFriendly({ bounceable: false }), amount: ATTACHED }),
+      chain,
+    );
+    const emulated = await chain.emulate(funding.boc);
+    expect(emulated.success).toBe(true);
+    expect(emulated.deliveries).toEqual([expect.objectContaining({ to: wallet.address, outcome: 'delivered' })]);
+    console.log(`funding a ${version} masterchain wallet: fees ${Number(emulated.fees) / 1e9} TON`);
+  });
+
   /** A fresh wallet of `version` at the first unused account index above the fee payer. */
   async function freshWallet(version: TonWalletVersion): Promise<TonWallet> {
     for (let account = env.feePayerAccount + 1; account < env.feePayerAccount + 50; account++) {

@@ -8,7 +8,7 @@ import { TonChain } from '../ton_chain.ts';
 import { tonRelayMessage, tonWalletRequestFields } from '../ton_messages.ts';
 import { type TonAccountState, TonBroadcastUncertainError, type TonProvider, tonBroadcastReply, TonProviderError } from '../ton_provider.ts';
 import { TonSignedTransaction, TonUnsignedTransaction } from '../ton_transactions.ts';
-import { TON_LEGACY_MAX_MESSAGES, TonWallet, deriveTonNativeSeed } from '../ton_wallet.ts';
+import { TON_LEGACY_DEFAULT_WALLET_ID, TON_LEGACY_MAX_MESSAGES, TonWallet, deriveTonNativeSeed } from '../ton_wallet.ts';
 import { MNEMONIC, OTHER, usdtJettonContent } from './ton_test_helpers.ts';
 
 const keyPair = keyPairFromSeed(deriveTonNativeSeed(MNEMONIC));
@@ -27,6 +27,39 @@ describe('TON wallet versions (v3r2, v4r2, v5r1)', () => {
     const addresses = (['v3r2', 'v4r2', 'v5r1'] as const).map((version) => TonWallet.fromMnemonic(MNEMONIC, { version }).address);
     expect(new Set(addresses).size).toBe(3);
     expect(() => TonWallet.fromMnemonic(MNEMONIC, { version: 'v2r2' as never })).toThrow(/version must be one of/);
+  });
+
+  describe('workchain -1 (the masterchain), as the Python SDK builds it', () => {
+    it("gives the Python SDK's W5 address on -1", () => {
+      // Computed by the Python SDK: TonWallet.from_mnemonic(phrase, version='v5r1', workchain=-1).
+      const w5 = TonWallet.fromMnemonic(MNEMONIC, { workchain: -1 });
+      expect(w5.address).toBe('-1:7b018a245a15b9a3002d4f23a24dae92c220fcb221de347a35a0b50b2960aa7d');
+      expect(w5.workchain).toBe(-1);
+    });
+
+    it.each(['v4r2', 'v3r2'] as const)(
+      "gives %s on -1 the Python SDK's wallet id, 698983191, not @ton/ton's 698983191 + workchain",
+      (version) => {
+        // ton_core's DEFAULT_SUBWALLET_ID is a constant, so the contract — and the address hash — is the workchain-0 one.
+        const basechain = TonWallet.fromMnemonic(MNEMONIC, { version });
+        const masterchain = TonWallet.fromMnemonic(MNEMONIC, { version, workchain: -1 });
+        expect(masterchain.address).toBe(`-1:${basechain.address.slice(2)}`);
+        expect((masterchain.contract as WalletContractV4).walletId).toBe(TON_LEGACY_DEFAULT_WALLET_ID);
+        const atonDefault = (version === 'v4r2' ? WalletContractV4 : WalletContractV3R2).create({ workchain: -1, publicKey: keyPair.publicKey });
+        expect(atonDefault.walletId).toBe(TON_LEGACY_DEFAULT_WALLET_ID - 1);
+        expect(atonDefault.address.toRawString()).not.toBe(masterchain.address);
+        // Its requests carry that wallet id, so the contract accepts them.
+        const body = loadMessage(Cell.fromBase64(masterchain.createExternalRequest({ seqno: 0, messages: [{ to: OTHER, value: 1n }] }).boc).beginParse()).body;
+        expect(tonWalletRequestFields(body).walletId).toBe(TON_LEGACY_DEFAULT_WALLET_ID);
+      },
+    );
+
+    it('takes a path and a workchain together, and refuses any other workchain', () => {
+      const atPath = TonWallet.fromMnemonic(MNEMONIC, { derivationPath: TonWallet.derivationPath({ account: 2 }), workchain: -1 });
+      expect(atPath.address.startsWith('-1:')).toBe(true);
+      expect(atPath.publicKey.equals(TonWallet.fromMnemonic(MNEMONIC, { derivationPath: TonWallet.derivationPath({ account: 2 }) }).publicKey)).toBe(true);
+      expect(() => TonWallet.fromMnemonic(MNEMONIC, { workchain: 1 as never })).toThrow(/workchain 0 or -1/);
+    });
   });
 
   it.each([
