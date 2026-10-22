@@ -9,13 +9,16 @@ export const USDT_MASTER = '0:b113a994b5024a16719f69139328eb759596c38a25f59028b1
 export const OTHER = '0:9d1e1843624c4d175a695a8c2de8a5a61f03b93336e8caa4e164bf6cbbab205e';
 export const JETTON_WALLET = '0:e655d099d9200bbf27c20d594f2ebd21a0f854c608cd16d4c0c5e9b3f55fc2e7';
 
+/** The normalized hash of the external message the recorded trace starts with: its id. */
+export const REAL_TRACE_MESSAGE_HASH = '0b64b29895862dae3dd18964c9c6b7562e35b9a81ade0d002f3c9a4823ee859e';
+
 /** The recorded W5 transfer trace (a wallet paying 3.7944 TON to another), read through TON Center's parser. */
 export async function realTrace(): Promise<TonTrace> {
   const body = JSON.parse(readFileSync(new URL('./fixtures/toncenter_trace.json', import.meta.url), 'utf8'));
   const realFetch = globalThis.fetch;
   globalThis.fetch = (async () => new Response(JSON.stringify(body), { status: 200 })) as typeof fetch;
   try {
-    return (await new ToncenterProvider({ url: 'https://x', apiKey: 'k' }).getTrace('50379a6ae50911e7e3b658ae96044411097992b6f9ca63c82c6b6c9f2de88d66')) as TonTrace;
+    return (await new ToncenterProvider({ url: 'https://x', apiKey: 'k' }).getTrace(REAL_TRACE_MESSAGE_HASH)) as TonTrace;
   } finally {
     globalThis.fetch = realFetch;
   }

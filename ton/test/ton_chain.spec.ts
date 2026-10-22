@@ -2,6 +2,7 @@ import { jest } from '@jest/globals';
 
 import { CHAIN_ID_TON_MAINNET } from '../../chain_ids.ts';
 import { ChainErrorKinds } from '../../errors.ts';
+import { tonUserFriendlyAddress } from '../ton_address.ts';
 import { REQUEST_EXPIRY_MARGIN_SECONDS, TonChain } from '../ton_chain.ts';
 import { TON_JETTON_TRANSFER_OP } from '../ton_messages.ts';
 import { type TonAccountState, TonBroadcastUncertainError, TonFallbackProvider, type TonProvider, TonProviderError } from '../ton_provider.ts';
@@ -60,6 +61,17 @@ describe('TonChain', () => {
     await expect(
       chain.createTransferUnsignedTransaction({ from, to: OTHER, tokenIdentifier: USDT_MASTER, isFullBalance: true }),
     ).rejects.toThrow(/amount/);
+  });
+
+  it.each([
+    ['EQ… (bounceable)', true, true],
+    ['UQ… (non-bounceable)', false, false],
+    ['raw', null, false],
+  ] as const)('makes a native transfer to a %s address bounce=%s', async (_form, bounceable, bounce) => {
+    const chain = chainWith(fakeProvider());
+    const to = bounceable === null ? OTHER : tonUserFriendlyAddress(OTHER, { bounceable });
+    const transfer = await chain.createTransferUnsignedTransaction({ from: TonWallet.fromMnemonic(MNEMONIC).address, to, amount: 1n });
+    expect(transfer.messages[0].bounce).toBe(bounce);
   });
 
   it('signs with the live seqno, and deploys an undeployed wallet', async () => {
@@ -131,11 +143,17 @@ describe('TonChain', () => {
       const trace = await realTrace();
       const relayer = trace.transactions[0].account;
       const chain = at(validUntil, 5, { getTrace: async () => trace });
+      // seqno 5 is the wallet's current seqno here, below the request's 508: not consumed by seqno.
       await expect(chain.getRequestState({ wallet: OTHER, seqno: 5, validUntil, hash })).rejects.toMatchObject({
         kind: ChainErrorKinds.InvalidArgument,
         message: expect.stringContaining('for a relayed request pass no hash'),
       });
-      await expect(chain.getRequestState({ wallet: relayer, seqno: 5, validUntil, hash })).resolves.toBe('consumed');
+      // The recorded request was signed at seqno 508; another seqno names another request.
+      await expect(chain.getRequestState({ wallet: relayer, seqno: 508, validUntil, hash })).resolves.toBe('consumed');
+      await expect(chain.getRequestState({ wallet: relayer, seqno: 5, validUntil, hash })).rejects.toMatchObject({
+        kind: ChainErrorKinds.InvalidArgument,
+        message: expect.stringContaining('signed at seqno 508'),
+      });
     });
 
     it('throws on a read that failed rather than answering', async () => {

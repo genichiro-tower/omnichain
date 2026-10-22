@@ -7,6 +7,7 @@ import {
   type TonHttpEndpoint,
   type TonMasterchainHead,
   type TonProvider,
+  type TonTransactionPhases,
   type TonTrace,
   type TonTraceTransaction,
   TonProviderError,
@@ -17,14 +18,18 @@ import {
   asStatedAccountStatus,
   assertTonTxHash,
   assertTraceConsistent,
+  assertTraceOf,
   definiteError,
   errorMessageOf,
   tonBroadcastReply,
+  tonTransactionOutcome,
   tonHttpJson,
   tonTraceMessageOf,
 } from './ton_provider.ts';
 
 const NAME = 'TonAPI';
+/** The get-method exit code for an account with no code to run. */
+const NO_CODE_EXIT_CODE = -13;
 const BLOCK_ID_REGEX = /^\((-?\d+),([0-9a-fA-F]+),(\d+)\)$/;
 
 interface TonapiTraceNode {
@@ -67,9 +72,22 @@ export class TonapiProvider implements TonProvider {
     return tonRawAddress(String((decoded as Record<string, unknown>).jetton_wallet_address));
   }
 
+  /**
+   * 0 only for a jetton wallet with no code: TonAPI answers a get-method on
+   * one with 404 (or exit code -13), which other failures can also produce, so
+   * the account state confirms it. Any other failure throws.
+   */
   async getJettonBalance(jettonWallet: string): Promise<bigint> {
-    const result = await this.runGetMethod(jettonWallet, 'get_wallet_data', []);
-    if (result === null) return 0n;
+    const reply = await this.get(this.getMethodPath(jettonWallet, 'get_wallet_data', []));
+    const result = reply === null ? null : asRecord(reply, 'get_wallet_data');
+    if (result === null || (result.success !== true && Number(result.exit_code) === NO_CODE_EXIT_CODE)) {
+      const state = await this.getAccountState(jettonWallet);
+      if (state.status === 'nonexist' || state.status === 'uninit') return 0n;
+      throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} could not run get_wallet_data on ${jettonWallet}, which is ${state.status}`, true);
+    }
+    if (result.success !== true || Number(result.exit_code ?? 0) !== 0) {
+      throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} could not run get_wallet_data on ${jettonWallet}`, true);
+    }
     const stack = Array.isArray(result.stack) ? result.stack : [];
     const first = stack[0] === undefined ? null : asRecord(stack[0], 'stack item');
     if (first === null || first.type !== 'num') throw definiteError(ChainErrorKinds.RpcError, `${NAME} returned no jetton balance`);
@@ -94,7 +112,7 @@ export class TonapiProvider implements TonProvider {
     if ((reply as TonapiTraceNode).emulated === true) return null;
     const root = withoutEmulated(reply as TonapiTraceNode);
     const transactions = await this.withMasterchainSeqnos(flatten(root));
-    return assertTraceConsistent(NAME, { complete: isComplete(root), transactions });
+    return assertTraceOf(NAME, hash, assertTraceConsistent(NAME, { complete: isComplete(root), transactions }));
   }
 
   async emulate(boc: string): Promise<TonTrace> {
@@ -143,13 +161,15 @@ export class TonapiProvider implements TonProvider {
 
   /** The reply of a get-method that ran, or `null` when the account has no code to run it. */
   private async runGetMethod(address: string, method: string, args: string[]): Promise<Record<string, unknown> | null> {
-    const query = args.map((arg) => `args=${encodeURIComponent(arg)}`).join('&');
-    const reply = await this.get(
-      `/v2/blockchain/accounts/${encodeURIComponent(tonRawAddress(address))}/methods/${method}${query.length > 0 ? `?${query}` : ''}`,
-    );
+    const reply = await this.get(this.getMethodPath(address, method, args));
     if (reply === null) return null;
     const result = asRecord(reply, method);
     return result.success === true && Number(result.exit_code ?? 0) === 0 ? result : null;
+  }
+
+  private getMethodPath(address: string, method: string, args: string[]): string {
+    const query = args.map((arg) => `args=${encodeURIComponent(arg)}`).join('&');
+    return `/v2/blockchain/accounts/${encodeURIComponent(tonRawAddress(address))}/methods/${method}${query.length > 0 ? `?${query}` : ''}`;
   }
 
   private get(path: string): Promise<unknown | null> {
@@ -202,22 +222,33 @@ function rawTransactionOf(tx: Record<string, unknown>): Transaction {
   return loadTransaction(Cell.fromBoc(Buffer.from(tx.raw, 'hex'))[0].beginParse());
 }
 
+/**
+ * The phases from the transaction's own BOC, the chain's record — not
+ * TonAPI's JSON phase fields, which are optional.
+ */
+function phasesOf(raw: Transaction): TonTransactionPhases {
+  const description = raw.description;
+  if (description.type !== 'generic' && description.type !== 'tick-tock') {
+    throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} trace holds a ${description.type} transaction`, true);
+  }
+  const compute = description.computePhase;
+  const action = description.actionPhase ?? null;
+  return {
+    computeSkipped: compute.type === 'skipped' ? compute.reason.replace('-', '_') : null,
+    computeSuccess: compute.type === 'vm' && compute.success,
+    computeExitCode: compute.type === 'vm' ? compute.exitCode : null,
+    action: action === null ? null : { success: action.success, resultCode: action.resultCode, skippedActions: action.skippedActions },
+    aborted: description.aborted,
+  };
+}
+
 function toTransaction(tx: Record<string, unknown>, parent: string | null, mcSeqno: number | null): TonTraceTransaction {
   const raw = rawTransactionOf(tx);
-  const compute = tx.compute_phase === undefined ? null : asRecord(tx.compute_phase, 'compute_phase');
-  const action = tx.action_phase === undefined || tx.action_phase === null ? null : asRecord(tx.action_phase, 'action_phase');
-  const computeOk = compute === null || (compute.skipped === true ? compute.skip_reason === 'cskip_no_state' : compute.success === true);
-  const skippedActions = action === null ? 0 : Number(action.skipped_actions ?? 0);
-  const actionOk = action === null || (action.success === true && skippedActions === 0);
   return {
     hash: raw.hash().toString('hex'),
     parent,
     account: tonRawAddress(String(asRecord(tx.account, 'account').address)),
-    success: computeOk && actionOk,
-    skippedActions,
-    aborted: tx.aborted === true,
-    computeExitCode: compute === null || compute.skipped === true ? null : Number(compute.exit_code),
-    actionResultCode: action === null ? null : Number(action.result_code),
+    ...tonTransactionOutcome(phasesOf(raw)),
     totalFees: raw.totalFees.coins,
     origStatus: asAccountStatus(tx.orig_status),
     endStatus: asAccountStatus(tx.end_status),

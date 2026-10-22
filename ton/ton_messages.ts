@@ -9,7 +9,29 @@ import {
   storeMessage,
 } from '@ton/core';
 
+import { createHash } from 'node:crypto';
+
 import { ChainError, ChainErrorKinds } from '../errors.ts';
+import { AbstractSignedMessage } from '../wallet.base.ts';
+
+const TON_MESSAGE_PREFIX = 'TON Signed Message:\n';
+
+/**
+ * What `signMessage` signs: SHA-256 of a fixed prefix and the message's UTF-8
+ * bytes, as Stellar's SEP-53 does. The same key authorizes W5 requests by
+ * signing a 32-byte cell hash, so signing a message's bytes directly would let
+ * a crafted 32-byte message stand in for a request; a prefixed digest cannot
+ * equal a cell hash without a SHA-256 preimage.
+ */
+export function tonMessageHash(message: string): Buffer {
+  return createHash('sha256').update(TON_MESSAGE_PREFIX, 'utf8').update(message, 'utf8').digest();
+}
+
+export class TonSignedMessage extends AbstractSignedMessage {
+  constructor(signature: string) {
+    super(signature);
+  }
+}
 
 /** W5's limit on outgoing messages per request. */
 export const TON_MAX_MESSAGES_PER_REQUEST = 255;

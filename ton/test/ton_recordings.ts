@@ -17,10 +17,17 @@ export interface RecordedCall {
   response: string;
 }
 
+/** A provider method the live suite called directly, replayed through that provider alone. */
+export type RecordedProviderMethod = 'getTrace' | 'emulate' | 'getSeqno' | 'getAccountState' | 'getJettonBalance' | 'getJettonWalletAddress' | 'sendBoc';
+
 export interface RecordedScenario {
   description: string;
-  /** What the SDK call was given: an external message BOC to emulate, or a hash to read. */
-  input: { boc?: string; hash?: string };
+  /**
+   * What the call was given: through `TonChain`, an external message BOC to
+   * emulate or a hash to read; through one provider (`provider`), a method
+   * and its arguments.
+   */
+  input: { boc?: string; hash?: string; provider?: 'TON Center' | 'TonAPI'; method?: RecordedProviderMethod; args?: string[] };
   calls: RecordedCall[];
   /** What the live run observed, asserted again on replay. */
   expect: {
@@ -28,7 +35,22 @@ export interface RecordedScenario {
     status?: string;
     errorCode?: string | null;
     deliveryOutcomes?: string[];
+    /** A provider method's result, as {@link describeResult} gives it. */
+    result?: string;
+    /** A provider method's error kind, when it threw. */
+    errorKind?: string;
   };
+}
+
+/** A provider result as stable text: bigints and cells (by hash) spelled out. */
+export function describeResult(value: unknown): string {
+  return JSON.stringify(value ?? null, (_key, v: unknown) => {
+    if (typeof v === 'bigint') return `${v}n`;
+    if (v !== null && typeof v === 'object' && typeof (v as { hash?: unknown }).hash === 'function' && 'bits' in (v as object)) {
+      return `cell:${(v as { hash(): Buffer }).hash().toString('hex')}`;
+    }
+    return v;
+  });
 }
 
 export interface Recordings {
@@ -41,8 +63,11 @@ export function readRecordings(): Recordings | null {
   return existsSync(RECORDINGS_PATH) ? (JSON.parse(readFileSync(RECORDINGS_PATH, 'utf8')) as Recordings) : null;
 }
 
+/** Writes `recordings`, keeping earlier scenarios this run did not record again (some, like a trace in flight, show up only sometimes). */
 export function writeRecordings(recordings: Recordings): void {
-  writeFileSync(RECORDINGS_PATH, `${JSON.stringify(recordings, null, 2)}\n`);
+  const earlier = readRecordings()?.scenarios ?? {};
+  const merged = { ...recordings, scenarios: { ...earlier, ...recordings.scenarios } };
+  writeFileSync(RECORDINGS_PATH, `${JSON.stringify(merged, null, 2)}\n`);
 }
 
 /** Wraps `fetch` to keep every call made until `take()`; the real request goes through unchanged. */

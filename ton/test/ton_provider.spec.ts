@@ -1,6 +1,14 @@
 import { readFileSync } from 'node:fs';
 
 import { jest } from '@jest/globals';
+import {
+  Cell,
+  type TransactionActionPhase,
+  type TransactionDescriptionGeneric,
+  beginCell,
+  loadTransaction,
+  storeTransaction,
+} from '@ton/core';
 
 import { ChainErrorKinds } from '../../errors.ts';
 import {
@@ -27,6 +35,13 @@ function stubFetch(handler: (url: string, init: RequestInit) => { status: number
   });
   globalThis.fetch = mock as unknown as typeof fetch;
   return mock;
+}
+
+/** A TonAPI `raw` transaction BOC (hex) with its description rewritten. */
+function withRawDescription(rawHex: string, edit: (d: TransactionDescriptionGeneric) => TransactionDescriptionGeneric): string {
+  const tx = loadTransaction(Cell.fromBoc(Buffer.from(rawHex, 'hex'))[0].beginParse());
+  const description = edit(tx.description as TransactionDescriptionGeneric);
+  return beginCell().store(storeTransaction({ ...tx, description })).endCell().toBoc().toString('hex');
 }
 
 const realFetch = globalThis.fetch;
@@ -140,11 +155,13 @@ describe('TonFallbackProvider', () => {
 });
 
 describe('trace normalization', () => {
+  // The root transaction's hash, and the normalized hash of the external message it received — the id a trace is looked up by.
   const TRACE_HASH = '50379a6ae50911e7e3b658ae96044411097992b6f9ca63c82c6b6c9f2de88d66';
+  const MESSAGE_HASH = '0b64b29895862dae3dd18964c9c6b7562e35b9a81ade0d002f3c9a4823ee859e';
 
   async function toncenterTrace(): Promise<TonTraceTransaction[]> {
     stubFetch(() => ({ status: 200, body: fixture('toncenter_trace.json') }));
-    const trace = await new ToncenterProvider(ENDPOINT).getTrace(TRACE_HASH);
+    const trace = await new ToncenterProvider(ENDPOINT).getTrace(MESSAGE_HASH);
     expect(trace?.complete).toBe(true);
     return trace?.transactions ?? [];
   }
@@ -155,7 +172,7 @@ describe('trace normalization', () => {
         ? { status: 200, body: { master_ref: '(-1,8000000000000000,100472527)' } }
         : { status: 200, body: fixture('tonapi_trace.json') },
     );
-    const trace = await new TonapiProvider(ENDPOINT).getTrace(TRACE_HASH);
+    const trace = await new TonapiProvider(ENDPOINT).getTrace(MESSAGE_HASH);
     expect(trace?.complete).toBe(true);
     return trace?.transactions ?? [];
   }
@@ -191,17 +208,21 @@ describe('trace normalization', () => {
     const root = toncenter.traces[0].transactions[toncenter.traces[0].trace.tx_hash];
     root.description.action = { ...root.description.action, success: true, skipped_actions: 1, msgs_created: 0 };
     stubFetch(() => ({ status: 200, body: toncenter }));
-    const fromToncenter = await new ToncenterProvider(ENDPOINT).getTrace(TRACE_HASH);
+    const fromToncenter = await new ToncenterProvider(ENDPOINT).getTrace(MESSAGE_HASH);
     expect(fromToncenter?.transactions[0]).toMatchObject({ success: false, skippedActions: 1 });
 
-    const tonapi = fixture('tonapi_trace.json') as { transaction: { action_phase: Record<string, unknown> } };
-    tonapi.transaction.action_phase = { ...tonapi.transaction.action_phase, success: true, skipped_actions: 1 };
+    // TonAPI is read from the transaction's own BOC, so the skip is written there.
+    const tonapi = fixture('tonapi_trace.json') as { transaction: { raw: string } };
+    tonapi.transaction.raw = withRawDescription(tonapi.transaction.raw, (d) => ({
+      ...d,
+      actionPhase: { ...(d.actionPhase as TransactionActionPhase), skippedActions: 1 },
+    }));
     stubFetch((url) =>
       url.includes('/v2/blockchain/blocks/')
         ? { status: 200, body: { master_ref: '(-1,8000000000000000,100472527)' } }
         : { status: 200, body: tonapi },
     );
-    const fromTonapi = await new TonapiProvider(ENDPOINT).getTrace(TRACE_HASH);
+    const fromTonapi = await new TonapiProvider(ENDPOINT).getTrace(MESSAGE_HASH);
     expect(fromTonapi?.transactions[0]).toMatchObject({ success: false, skippedActions: 1 });
   });
 
@@ -215,7 +236,7 @@ describe('trace normalization', () => {
     const child = toncenter.traces[0].transactions[childHash];
     child.in_msg = { ...child.in_msg, value: '1' };
     stubFetch(() => ({ status: 200, body: toncenter }));
-    const err = await new ToncenterProvider(ENDPOINT).getTrace(TRACE_HASH).catch((e: unknown) => e);
+    const err = await new ToncenterProvider(ENDPOINT).getTrace(MESSAGE_HASH).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(TonProviderError);
     expect((err as TonProviderError).retryable).toBe(true);
     expect((err as Error).message).toMatch(/inconsistent trace/i);
@@ -231,7 +252,7 @@ describe('trace normalization', () => {
       new TonapiProvider(ENDPOINT),
       onFallback,
     );
-    const trace = await provider.getTrace(TRACE_HASH);
+    const trace = await provider.getTrace(MESSAGE_HASH);
     expect(trace?.transactions).toHaveLength(2);
     expect(onFallback).toHaveBeenCalledWith('getTrace', expect.any(TonProviderError));
   });
@@ -241,7 +262,7 @@ describe('trace normalization', () => {
     delete toncenter.traces[0].transactions[toncenter.traces[0].trace.tx_hash];
     toncenter.traces[0].trace_info = { ...toncenter.traces[0].trace_info, trace_state: 'pending' };
     stubFetch(() => ({ status: 200, body: toncenter }));
-    const trace = await new ToncenterProvider(ENDPOINT).getTrace(TRACE_HASH);
+    const trace = await new ToncenterProvider(ENDPOINT).getTrace(MESSAGE_HASH);
     expect(trace?.complete).toBe(false);
     expect(trace?.transactions).toHaveLength(1);
     expect(trace?.transactions[0].parent).toBe(TRACE_HASH);
@@ -251,7 +272,7 @@ describe('trace normalization', () => {
     const toncenter = fixture('toncenter_trace.json') as ToncenterTraceFixture;
     delete toncenter.traces[0].transactions[toncenter.traces[0].trace.tx_hash];
     stubFetch(() => ({ status: 200, body: toncenter }));
-    await expect(new ToncenterProvider(ENDPOINT).getTrace(TRACE_HASH)).rejects.toMatchObject({ retryable: true });
+    await expect(new ToncenterProvider(ENDPOINT).getTrace(MESSAGE_HASH)).rejects.toMatchObject({ retryable: true });
 
     stubFetch((url) => {
       if (url.startsWith('https://toncenter.test')) return { status: 200, body: toncenter };
@@ -259,7 +280,7 @@ describe('trace normalization', () => {
       return { status: 200, body: fixture('tonapi_trace.json') };
     });
     const provider = new TonFallbackProvider(new ToncenterProvider({ url: 'https://toncenter.test', apiKey: 'key' }), new TonapiProvider(ENDPOINT));
-    const trace = await provider.getTrace(TRACE_HASH);
+    const trace = await provider.getTrace(MESSAGE_HASH);
     expect(trace).toMatchObject({ complete: true });
     expect(trace?.transactions).toHaveLength(2);
   });
@@ -268,12 +289,12 @@ describe('trace normalization', () => {
     const masterRef = { status: 200, body: { master_ref: '(-1,8000000000000000,100472527)' } };
     const predicted = { ...(fixture('tonapi_trace.json') as Record<string, unknown>), emulated: true };
     stubFetch((url) => (url.includes('/v2/blockchain/blocks/') ? masterRef : { status: 200, body: predicted }));
-    await expect(new TonapiProvider(ENDPOINT).getTrace(TRACE_HASH)).resolves.toBeNull();
+    await expect(new TonapiProvider(ENDPOINT).getTrace(MESSAGE_HASH)).resolves.toBeNull();
 
     const partly = fixture('tonapi_trace.json') as { children: Array<Record<string, unknown>> };
     partly.children[0].emulated = true;
     stubFetch((url) => (url.includes('/v2/blockchain/blocks/') ? masterRef : { status: 200, body: partly }));
-    const trace = await new TonapiProvider(ENDPOINT).getTrace(TRACE_HASH);
+    const trace = await new TonapiProvider(ENDPOINT).getTrace(MESSAGE_HASH);
     expect(trace?.complete).toBe(false);
     expect(trace?.transactions.map((tx) => tx.hash)).toEqual([TRACE_HASH]);
   });
@@ -292,12 +313,12 @@ describe('trace normalization', () => {
       const toncenter = fixture('toncenter_trace.json') as ToncenterTraceFixture;
       toncenter.traces[0].trace.children = [];
       stubFetch(() => ({ status: 200, body: toncenter }));
-      await expect(new ToncenterProvider(ENDPOINT).getTrace(TRACE_HASH)).rejects.toMatchObject({
+      await expect(new ToncenterProvider(ENDPOINT).getTrace(MESSAGE_HASH)).rejects.toMatchObject({
         retryable: true,
         message: expect.stringContaining('reached no transaction'),
       });
       tonapiAnswers(toncenter);
-      const trace = await fallingBack().getTrace(TRACE_HASH);
+      const trace = await fallingBack().getTrace(MESSAGE_HASH);
       expect(trace?.transactions).toHaveLength(2);
     });
 
@@ -306,7 +327,7 @@ describe('trace normalization', () => {
       const child = toncenter.traces[0].transactions[toncenter.traces[0].trace.children[0].tx_hash] as { in_msg: unknown };
       child.in_msg = null;
       stubFetch(() => ({ status: 200, body: toncenter }));
-      await expect(new ToncenterProvider(ENDPOINT).getTrace(TRACE_HASH)).rejects.toMatchObject({
+      await expect(new ToncenterProvider(ENDPOINT).getTrace(MESSAGE_HASH)).rejects.toMatchObject({
         retryable: true,
         message: expect.stringContaining('no incoming internal message'),
       });
@@ -319,26 +340,85 @@ describe('trace normalization', () => {
 
     it('refuses a reply without a trace list, and reads only the explicit answers as no trace', async () => {
       stubFetch(() => ({ status: 404, body: { error: 'not found' } }));
-      await expect(new ToncenterProvider(ENDPOINT).getTrace(TRACE_HASH)).rejects.toMatchObject({ retryable: true });
+      await expect(new ToncenterProvider(ENDPOINT).getTrace(MESSAGE_HASH)).rejects.toMatchObject({ retryable: true });
       stubFetch(() => ({ status: 200, body: { address_book: {} } }));
-      await expect(new ToncenterProvider(ENDPOINT).getTrace(TRACE_HASH)).rejects.toMatchObject({ retryable: true });
+      await expect(new ToncenterProvider(ENDPOINT).getTrace(MESSAGE_HASH)).rejects.toMatchObject({ retryable: true });
+    });
+
+    it("refuses the trace of another message than the one asked for, and TonAPI's answers", async () => {
+      const other = 'cd'.repeat(32);
+      stubFetch(() => ({ status: 200, body: fixture('toncenter_trace.json') }));
+      await expect(new ToncenterProvider(ENDPOINT).getTrace(other)).rejects.toMatchObject({
+        retryable: true,
+        message: expect.stringContaining('another message'),
+      });
+      stubFetch((url) =>
+        url.includes('/v2/blockchain/blocks/')
+          ? { status: 200, body: { master_ref: '(-1,8000000000000000,100472527)' } }
+          : { status: 200, body: fixture('tonapi_trace.json') },
+      );
+      await expect(new TonapiProvider(ENDPOINT).getTrace(other)).rejects.toMatchObject({ retryable: true });
     });
 
     it('refuses a malformed hash before asking either provider', async () => {
       const calls = stubFetch(() => ({ status: 200, body: { traces: [] } }));
       for (const provider of [new ToncenterProvider(ENDPOINT), new TonapiProvider(ENDPOINT)]) {
-        await expect(provider.getTrace(TRACE_HASH.toUpperCase())).rejects.toMatchObject({ kind: ChainErrorKinds.InvalidArgument });
+        await expect(provider.getTrace(MESSAGE_HASH.toUpperCase())).rejects.toMatchObject({ kind: ChainErrorKinds.InvalidArgument });
         await expect(provider.getTrace('../accounts/x')).rejects.toMatchObject({ kind: ChainErrorKinds.InvalidArgument });
       }
       expect(calls).not.toHaveBeenCalled();
     });
   });
 
+  describe('never reads missing phase data as success', () => {
+    type TxFixture = Record<string, { description: Record<string, unknown> }>;
+    const toncenterWith = (edit: (root: { description: Record<string, unknown> } & Record<string, unknown>) => void): unknown => {
+      const toncenter = fixture('toncenter_trace.json') as ToncenterTraceFixture;
+      const transactions = toncenter.traces[0].transactions as unknown as TxFixture;
+      edit(transactions[toncenter.traces[0].trace.tx_hash] as { description: Record<string, unknown> } & Record<string, unknown>);
+      return toncenter;
+    };
+
+    it.each([
+      ['without a description', (root: Record<string, unknown>) => delete root.description],
+      ['without a compute phase', (root: { description: Record<string, unknown> }) => delete root.description.compute_ph],
+      ['with a compute phase that succeeded but no action phase', (root: { description: Record<string, unknown> }) => delete root.description.action],
+      ['without a compute exit code', (root: { description: { compute_ph: Record<string, unknown> } }) => delete root.description.compute_ph.exit_code],
+      ['without aborted', (root: { description: Record<string, unknown> }) => delete root.description.aborted],
+    ] as Array<[string, (root: never) => void]>)('refuses a TON Center transaction %s, retryably', async (_case, edit) => {
+      stubFetch(() => ({ status: 200, body: toncenterWith(edit as never) }));
+      await expect(new ToncenterProvider(ENDPOINT).getTrace(MESSAGE_HASH)).rejects.toMatchObject({
+        retryable: true,
+        message: expect.stringContaining('Malformed TON provider reply'),
+      });
+    });
+
+    it("judges TonAPI's transactions from their own BOC, not its optional JSON phases", async () => {
+      const tonapi = fixture('tonapi_trace.json') as { transaction: Record<string, unknown> & { raw: string } };
+      // The JSON claims nothing about the phases; the BOC says the compute phase failed.
+      delete tonapi.transaction.compute_phase;
+      delete tonapi.transaction.action_phase;
+      tonapi.transaction.raw = withRawDescription(tonapi.transaction.raw, (d) => ({
+        ...d,
+        aborted: true,
+        computePhase: { ...(d.computePhase as Extract<TransactionDescriptionGeneric['computePhase'], { type: 'vm' }>), success: false, exitCode: 35 },
+        actionPhase: undefined,
+      }));
+      stubFetch((url) =>
+        url.includes('/v2/blockchain/blocks/')
+          ? { status: 200, body: { master_ref: '(-1,8000000000000000,100472527)' } }
+          : { status: 200, body: tonapi },
+      );
+      const trace = await new TonapiProvider(ENDPOINT).getTrace(MESSAGE_HASH);
+      expect(trace?.transactions[0]).toMatchObject({ success: false, aborted: true, computeExitCode: 35, actionResultCode: null });
+    });
+  });
+
   it('reads an unseen message as no trace', async () => {
     stubFetch(() => ({ status: 200, body: { traces: [] } }));
-    await expect(new ToncenterProvider(ENDPOINT).getTrace(TRACE_HASH)).resolves.toBeNull();
+    await expect(new ToncenterProvider(ENDPOINT).getTrace(MESSAGE_HASH)).resolves.toBeNull();
     stubFetch(() => ({ status: 404, body: { error: 'entity not found' } }));
-    await expect(new TonapiProvider(ENDPOINT).getTrace(TRACE_HASH)).resolves.toBeNull();
+    await expect(new TonapiProvider(ENDPOINT).getTrace(MESSAGE_HASH)).resolves.toBeNull();
   });
 });
 
@@ -438,8 +518,27 @@ describe('account reads', () => {
   it('reads an undeployed jetton wallet as 0 on both providers', async () => {
     stubFetch(() => ({ status: 200, body: { gas_used: 0, exit_code: -13, stack: [] } }));
     await expect(new ToncenterProvider(ENDPOINT).getJettonBalance('0:' + 'ab'.repeat(32))).resolves.toBe(0n);
-    stubFetch(() => ({ status: 404, body: { error: 'entity not found' } }));
+    // TonAPI's 404 is confirmed against the account state.
+    stubFetch((url) =>
+      url.includes('/methods/')
+        ? { status: 404, body: { error: 'entity not found' } }
+        : { status: 200, body: { balance: 0, status: 'nonexist' } },
+    );
     await expect(new TonapiProvider(ENDPOINT).getJettonBalance('0:' + 'ab'.repeat(32))).resolves.toBe(0n);
+  });
+
+  it('refuses a failed read of a deployed jetton wallet instead of reading 0', async () => {
+    const JETTON = '0:' + 'ab'.repeat(32);
+    stubFetch(() => ({ status: 200, body: { gas_used: 0, exit_code: 11, stack: [] } }));
+    await expect(new ToncenterProvider(ENDPOINT).getJettonBalance(JETTON)).rejects.toMatchObject({ retryable: true });
+    stubFetch(() => ({ status: 200, body: { error: 'liteserver timeout', exit_code: 0 } }));
+    await expect(new ToncenterProvider(ENDPOINT).getJettonBalance(JETTON)).rejects.toMatchObject({ retryable: true });
+    stubFetch((url) =>
+      url.includes('/methods/') ? { status: 404, body: { error: 'entity not found' } } : { status: 200, body: { balance: 5, status: 'active' } },
+    );
+    await expect(new TonapiProvider(ENDPOINT).getJettonBalance(JETTON)).rejects.toMatchObject({ retryable: true });
+    stubFetch(() => ({ status: 200, body: { success: false, exit_code: 11, stack: [] } }));
+    await expect(new TonapiProvider(ENDPOINT).getJettonBalance(JETTON)).rejects.toMatchObject({ retryable: true });
   });
 
   it('sends the key the way each provider expects', async () => {

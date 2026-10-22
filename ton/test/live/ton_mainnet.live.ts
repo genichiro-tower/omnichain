@@ -15,7 +15,15 @@ import { ToncenterProvider } from '../../ton_toncenter.ts';
 import { TonapiProvider } from '../../ton_tonapi.ts';
 import { type TonTransactionStatus, summarizeTonTrace } from '../../ton_transaction_status.ts';
 import { TonWallet } from '../../ton_wallet.ts';
-import { FetchRecorder, type RecordedScenario, type Recordings, writeRecordings } from '../ton_recordings.ts';
+import {
+  FetchRecorder,
+  type RecordedProviderMethod,
+  type RecordedScenario,
+  type Recordings,
+  describeResult,
+  writeRecordings,
+} from '../ton_recordings.ts';
+import { USDT_MASTER } from '../ton_test_helpers.ts';
 
 /**
  * TON mainnet, for real: `npm run test:live:ton`. Never run by `npm test`.
@@ -125,6 +133,34 @@ async function completeTrace(provider: TonProvider, hash: string): Promise<TonTr
   }
 }
 
+/**
+ * Calls one provider directly and records the replies, so `npm test` replays
+ * them through that provider's parsing (TonAPI's included, which the chain
+ * reaches only on a fallback).
+ */
+async function providerRecorded(
+  name: string,
+  description: string,
+  provider: ToncenterProvider | TonapiProvider,
+  method: RecordedProviderMethod,
+  ...args: string[]
+): Promise<unknown> {
+  recorder.take();
+  const call = provider[method] as (...a: string[]) => Promise<unknown>;
+  const outcome = await call.apply(provider, args).then(
+    (result) => ({ result }),
+    (err: unknown) => ({ err }),
+  );
+  scenarios[name] = {
+    description,
+    input: { provider: provider.name as 'TON Center' | 'TonAPI', method, args },
+    calls: recorder.take(),
+    expect: 'err' in outcome ? { errorKind: (outcome.err as { kind?: string }).kind ?? String(outcome.err) } : { result: describeResult(outcome.result) },
+  };
+  if ('err' in outcome) throw outcome.err;
+  return outcome.result;
+}
+
 async function emulateRecorded(name: string, description: string, boc: string): Promise<TonEmulationResult> {
   recorder.take();
   const result = await chain.emulate(boc);
@@ -205,7 +241,8 @@ describe('TON mainnet (live)', () => {
   it('emulates a relay the same on both providers', async () => {
     const { wallet: vault } = await freshVault(env.feePayerAccount);
     const { boc } = await relayBoc(vault, true);
-    const [fromToncenter, fromTonapi] = await Promise.all(providers.map((p) => p.emulate(boc)));
+    const fromToncenter = await toncenter.emulate(boc);
+    const fromTonapi = (await providerRecorded('tonapi_emulate_relay', 'TonAPI emulating a relay that deploys a fresh vault', tonapi, 'emulate', boc)) as TonTrace;
     const judged = (trace: TonTrace): unknown => {
       const summary = summarizeTonTrace(CHAIN_ID_TON_MAINNET, trace);
       return { success: summary.success, deliveries: summary.deliveries.map((d) => d.outcome) };
@@ -224,6 +261,27 @@ describe('TON mainnet (live)', () => {
     // A signed transaction carries what the check needs, read from the signed body.
     const signed = new TonSignedTransaction({ chainId: chain.chainId, boc: fresh.boc });
     expect(signed).toMatchObject({ walletAddress: feePayer.address, seqno: fresh.seqno, validUntil: fresh.validUntil, txHash: fresh.hash });
+  });
+
+  it('reads a never-used address on TonAPI: nonexist, seqno 0, no jettons', async () => {
+    const { wallet: vault } = await freshVault(env.feePayerAccount);
+    await expect(providerRecorded('tonapi_account_nonexist', 'TonAPI account state of a never-used address', tonapi, 'getAccountState', vault.address)).resolves.toMatchObject({
+      status: 'nonexist',
+      balance: 0n,
+    });
+    await expect(providerRecorded('tonapi_seqno_undeployed', 'TonAPI seqno of a never-used address', tonapi, 'getSeqno', vault.address)).resolves.toBe(0);
+    await expect(
+      providerRecorded('tonapi_jetton_balance_undeployed', 'TonAPI jetton balance of a never-used address (404, confirmed by the account state)', tonapi, 'getJettonBalance', vault.address),
+    ).resolves.toBe(0n);
+  });
+
+  it("finds the fee payer's USDT jetton wallet alike on both providers, empty while undeployed (AC5)", async () => {
+    const fromToncenter = await providerRecorded('toncenter_usdt_jetton_wallet', "TON Center: the fee payer's USDT jetton wallet from the master's get-method", toncenter, 'getJettonWalletAddress', USDT_MASTER, feePayer.address);
+    const fromTonapi = await providerRecorded('tonapi_usdt_jetton_wallet', "TonAPI: the fee payer's USDT jetton wallet from the master's get-method", tonapi, 'getJettonWalletAddress', USDT_MASTER, feePayer.address);
+    expect(fromTonapi).toBe(fromToncenter);
+    expect(await chain.getJettonWalletAddress(USDT_MASTER, feePayer.address)).toBe(fromToncenter);
+    expect((await chain.getAccountState(fromToncenter as string)).status).toBe('nonexist');
+    expect(await chain.getBalance(feePayer.address, USDT_MASTER)).toBe(0n);
   });
 
   it('emulates a relay that deploys a fresh vault (AC3)', async () => {
@@ -255,17 +313,37 @@ describe('TON mainnet (live)', () => {
     sent = request;
     deployedVault = vault;
     console.log(`sent ${hash}`);
+    // Just sent, TonAPI may answer with its emulation of the message in flight: never a trace.
+    recorder.take();
+    const inFlight = await tonapi.getTrace(hash);
+    const calls = recorder.take();
+    if (calls.some((call) => call.response.includes('"emulated":true'))) {
+      expect(inFlight).toBeNull();
+      scenarios.tonapi_trace_in_flight = {
+        description: 'TonAPI answering a trace request for a message in flight with its emulation',
+        input: { provider: 'TonAPI', method: 'getTrace', args: [hash] },
+        calls,
+        expect: { result: describeResult(null) },
+      };
+      console.log('TonAPI answered with an emulation of the message in flight');
+    }
     const status = await finalStatusRecorded('relay_deploy_sent', 'the deploy relay, sent and final', hash);
     expect(status.status).toBe(TransactionStatusTypes.Success);
     expect((await chain.getAccountState(vault.address)).status).toBe('active');
     expect(await chain.getSeqno(vault.address)).toBe(1);
     expect(status.fees).toBeLessThan(env.maxSpend);
+    // The emulation priced it: within a fifth of what it cost.
+    const paid = status.fees as bigint;
+    const gap = paid > emulated.fees ? paid - emulated.fees : emulated.fees - paid;
+    console.log(`fees: emulated ${Number(emulated.fees) / 1e9} TON, paid ${Number(paid) / 1e9} TON`);
+    expect(gap * 5n).toBeLessThanOrEqual(emulated.fees);
   });
 
   (env.send ? it : it.skip)('reads the sent trace the same from both providers', async () => {
     if (sent === null) throw new Error('the deploy relay was not sent');
     const hash = sent.hash;
-    const [fromToncenter, fromTonapi] = await Promise.all(providers.map((p) => completeTrace(p, hash)));
+    const [fromToncenter] = await Promise.all([completeTrace(toncenter, hash), completeTrace(tonapi, hash)]);
+    const fromTonapi = (await providerRecorded('tonapi_trace_sent', 'TonAPI trace of the sent deploy relay, complete', tonapi, 'getTrace', hash)) as TonTrace;
     expect(comparable(fromTonapi)).toEqual(comparable(fromToncenter));
   });
 
@@ -282,11 +360,18 @@ describe('TON mainnet (live)', () => {
     if (sent === null) throw new Error('the deploy relay was not sent');
     const seqno = await chain.getSeqno(feePayer.address);
     expect(seqno).toBe(sent.seqno + 1);
+    const resend = sent.boc;
     for (const provider of providers) {
       // A retryable reply is an outage, not an answer; ask again.
       let err: unknown = null;
       for (let attempt = 0; attempt < 3; attempt++) {
-        err = await provider.sendBoc(sent.boc).then(() => null, (e: unknown) => e);
+        err = await providerRecorded(
+          `${provider === tonapi ? 'tonapi' : 'toncenter'}_resend_landed`,
+          `${provider.name} answering a resend of a message that landed`,
+          provider as ToncenterProvider | TonapiProvider,
+          'sendBoc',
+          resend,
+        ).then(() => null, (e: unknown) => e);
         console.log(`${provider.name} on a resend: ${(err as Error | null)?.message ?? 'accepted'}`);
         if (!(err as { retryable?: boolean } | null)?.retryable) break;
         await new Promise((resolve) => setTimeout(resolve, 2_000));
@@ -350,6 +435,20 @@ describe('TON mainnet (live)', () => {
     const status = await finalStatusRecorded('relay_without_deploy_sent', 'a relay without deploy, sent; bounced back to the fee payer', hash);
     expect(status.status).toBe(TransactionStatusTypes.Failed);
     // The undeployed vault's compute phase was skipped, so TON sent the value back.
+    expect(status.summary?.deliveries.map((d) => d.outcome)).toEqual(['bounced']);
+  });
+
+  (env.send ? it : it.skip)('reads a jetton transfer to a jetton wallet with no code as Failed, bounced (AC6)', async () => {
+    // The fee payer's own USDT jetton wallet is not deployed: the transfer bounces, no jettons needed.
+    const transfer = await chain.createTransferUnsignedTransaction({ from: feePayer.address, to: feePayer.address, tokenIdentifier: USDT_MASTER, amount: 1n });
+    const signed = await feePayer.signTransaction(transfer, chain);
+    const emulated = await chain.emulate(signed.boc);
+    expect(emulated.problem?.code).toBe('bounced');
+    const hash = await chain.broadcast(signed.boc);
+    console.log(`sent ${hash} (jetton transfer to a jetton wallet with no code)`);
+    const status = await finalStatusRecorded('jetton_transfer_bounced', 'a USDT transfer from a wallet whose jetton wallet has no code; bounced', hash);
+    expect(status.status).toBe(TransactionStatusTypes.Failed);
+    expect(status.error?.code).toBe('bounced');
     expect(status.summary?.deliveries.map((d) => d.outcome)).toEqual(['bounced']);
   });
 

@@ -288,15 +288,17 @@ afterwards whether it did.
     `bounced`, value back to the fee payer;
   - the run spent 0.0029 TON; the replies are recorded and replayed under
     `npm test`.
-- The live suite (14 tests) also checks both providers against each other:
+- The live suite (17 tests) also checks both providers against each other:
   the masterchain head, emulation and the sent trace alike (both passing the
   trace check), `getRequestState` on a request never sent (`expired` /
   `live`) and on one that landed (`consumed`), a resend of a landed message
   (`NonceTooLow` from both, never landing twice), and a relayed request that
   failed (`live`, seqno unchanged) then executed when delivered again
-  (`consumed`, its seqno and `validUntil` read back from the trace). Last
-  run 2026-10-21: 14 passed, 0.0055 TON.
-- 1865 tests pass (107 for TON).
+  (`consumed`, its seqno and `validUntil` read back from the trace), AC5,
+  AC6 (a jetton transfer bounced by a jetton wallet with no code), and the
+  paid fees within a fifth of the emulated ones (equal on the last run).
+  Last run 2026-10-22: 17 passed, 0.0062 TON; 17 recorded scenarios.
+- 1899 tests pass (141 for TON, the 17 recorded scenarios included).
 
 <!-- ====================== PART C - DEVIATIONS ====================== -->
 
@@ -360,8 +362,12 @@ PR: `getomnichain/omnichain#17` (`genichiro-tower:feature/ton-chain` →
     git-ignored `.env.ton.local` (template `.env.ton.example`), parsed into
     Jest's own `process.env`. Recordings keep URLs, bodies and replies, never
     headers.
-  - AC6 (a refunded jetton transfer) is covered by hand-built traces only;
-    recording one needs jettons on the fee payer.
+  - AC6 is recorded on mainnet without jettons: a USDT transfer to the fee
+    payer's own jetton wallet, which has no code, bounces (`Failed`,
+    `bounced`). AC5 too: the USDT jetton wallet alike on both providers and
+    empty. TonAPI's replies (emulation, a complete trace, its emulation of a
+    message in flight, a never-used address, a resend) are recorded and
+    replayed through `TonapiProvider` under `npm test`.
 - **R8, replacing a request:** one check,
   `getRequestState({ wallet, seqno, validUntil, hash? })` →
   `live | expired | consumed`, for external and relayed requests alike.
@@ -384,6 +390,15 @@ PR: `getomnichain/omnichain#17` (`genichiro-tower:feature/ton-chain` →
   its signed body and round-trips through JSON (registered type).
   `tonW5RequestFields` / `tonInternalRequestOf` read them from any signed W5
   body, so `getRequestState` can always be called after the fact.
+- **Reads never fail open:** TON Center's phase data is required (missing
+  `description` / `compute_ph` / `aborted`, or a successful compute phase
+  without an action phase, is a retryable malformed reply); TonAPI's
+  transactions are judged from their BOC, not its optional JSON phases. A
+  jetton wallet reads 0 only with no code (TON Center -13; TonAPI 404
+  confirmed by the account state). A trace must be the requested message's.
+- **R5, native transfers:** bounceable to `EQ…`, not to `UQ…` or raw.
+- **R4, signatures:** `TonChain.verifySignature(publicKey, message, sig)`
+  verifies with the public key only; signatures must be exactly 128 hex.
 - The root entry exports only `TonAddress`; the family is `./ton`.
 
 ---

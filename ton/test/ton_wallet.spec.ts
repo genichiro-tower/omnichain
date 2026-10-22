@@ -5,9 +5,11 @@ import { WalletContractV5R1 } from '@ton/ton';
 
 import { signVerify } from '@ton/crypto';
 
-import { TonWallet, deriveSlip10Ed25519Seed, tonMessageHash } from '../ton_wallet.ts';
+import { TonWallet, deriveSlip10Ed25519Seed } from '../ton_wallet.ts';
 import { CHAIN_ID_TON_MAINNET } from '../../chain_ids.ts';
-import { tonInternalRequestOf, tonW5RequestFields } from '../ton_messages.ts';
+import { TonSignedMessage, tonInternalRequestOf, tonMessageHash, tonW5RequestFields } from '../ton_messages.ts';
+import { TonChain } from '../ton_chain.ts';
+import { TronSignedMessage } from '../../tron/tron_chain.ts';
 import { TonSignedTransaction, tonExternalBocHash } from '../ton_transactions.ts';
 
 const MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
@@ -42,6 +44,14 @@ describe('TonWallet', () => {
     const second = TonWallet.fromMnemonic(MNEMONIC, { derivationPath: TonWallet.derivationPath({ account: 1 }) });
     expect(second.address).not.toBe(wallet.address);
     expect(TonWallet.fromMnemonic(MNEMONIC).address).toBe(wallet.address);
+  });
+
+  it('gives fixed addresses for the BIP-39 test vector (AC2)', () => {
+    // Computed independently of this code; a change in the passphrase, coin type or W5R1 code cell moves them.
+    expect(wallet.address).toBe('0:47caefa86550c7458435fab2a51aaa47cb9c80a9a9cf062ac440d30d3a67c72e');
+    expect(TonWallet.fromMnemonic(MNEMONIC, { derivationPath: TonWallet.derivationPath({ account: 1 }) }).address).toBe(
+      '0:287246fae4df4daab7991eb61f862a46f7843f8196130645749af6a8a4b104cc',
+    );
   });
 
   it('gives the non-bounceable form for deposits', () => {
@@ -106,6 +116,43 @@ describe('TonWallet', () => {
     const signed = wallet.signMessage('hello');
     expect(wallet.verifySignature('hello', signed)).toBe(true);
     expect(wallet.verifySignature('hellO', signed)).toBe(false);
+    const empty = wallet.signMessage('');
+    expect(wallet.verifySignature('', empty)).toBe(true);
+    expect(wallet.verifySignature(' ', empty)).toBe(false);
+  });
+
+  describe('TonChain.verifySignature, with the public key only', () => {
+    const signed = wallet.signMessage('hi');
+    const publicKeyHex = wallet.publicKey.toString('hex');
+
+    it('verifies against the public key as bytes or hex', () => {
+      expect(TonChain.verifySignature(wallet.publicKey, 'hi', signed)).toBe(true);
+      expect(TonChain.verifySignature(publicKeyHex, 'hi', signed)).toBe(true);
+      expect(TonChain.verifySignature(publicKeyHex.toUpperCase(), 'hi', signed)).toBe(true);
+    });
+
+    it.each([
+      ['trailing junk', `${signed.signature}zz-garbage`],
+      ['a trailing hex byte (65 bytes)', `${signed.signature}00`],
+      ['a missing byte (63 bytes)', signed.signature.slice(0, 126)],
+      ['an odd length', signed.signature.slice(0, 127)],
+      ['a 0x prefix', `0x${signed.signature}`],
+      ['empty', ''],
+    ])('refuses a signature with %s', (_case, signature) => {
+      expect(TonChain.verifySignature(wallet.publicKey, 'hi', new TonSignedMessage(signature))).toBe(false);
+    });
+
+    it("refuses another wallet's signature", () => {
+      const other = TonWallet.fromMnemonic(MNEMONIC, { derivationPath: TonWallet.derivationPath({ account: 1 }) });
+      expect(TonChain.verifySignature(wallet.publicKey, 'hi', other.signMessage('hi'))).toBe(false);
+      expect(TonChain.verifySignature(other.publicKey, 'hi', other.signMessage('hi'))).toBe(true);
+    });
+
+    it('refuses a malformed public key and a signature of another family', () => {
+      expect(() => TonChain.verifySignature(publicKeyHex.slice(2), 'hi', signed)).toThrow(/64 hex characters/);
+      expect(() => TonChain.verifySignature(new Uint8Array(31), 'hi', signed)).toThrow(/32 bytes/);
+      expect(() => TonChain.verifySignature(wallet.publicKey, 'hi', new TronSignedMessage(signed.signature))).toThrow(/TonSignedMessage/);
+    });
   });
 
   it('never signs a message\'s own bytes, which could pass for a W5 request hash', () => {

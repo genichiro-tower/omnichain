@@ -1,7 +1,7 @@
-import { createHash, createHmac } from 'node:crypto';
+import { createHmac } from 'node:crypto';
 
 import { type Cell, type StateInit, beginCell, external, storeMessage } from '@ton/core';
-import { keyPairFromSeed, sign, signVerify } from '@ton/crypto';
+import { keyPairFromSeed, sign } from '@ton/crypto';
 import { WalletContractV5R1 } from '@ton/ton';
 
 import { mnemonicToSeedBip39 } from '../bip39.ts';
@@ -13,7 +13,14 @@ import { UnsignedTransaction } from '../unsigned_transaction.ts';
 import { AbstractBip32StyleSingleAccountWallet, AbstractSignedMessage } from '../wallet.base.ts';
 import { TonAddress, type TonUserFriendlyOptions } from './ton_address.ts';
 import { TonChain } from './ton_chain.ts';
-import { type TonInternalRequest, type TonOutMessage, tonNormalizedExternalHash, tonOutActions } from './ton_messages.ts';
+import {
+  type TonInternalRequest,
+  type TonOutMessage,
+  TonSignedMessage,
+  tonMessageHash,
+  tonNormalizedExternalHash,
+  tonOutActions,
+} from './ton_messages.ts';
 import { TonSignedTransaction, TonUnsignedTransaction } from './ton_transactions.ts';
 
 const TON_COIN_TYPE = 607;
@@ -45,25 +52,6 @@ export function deriveSlip10Ed25519Seed(bip39Seed: Uint8Array, path: readonly nu
 /** The ed25519 seed of `m/44'/607'/{index}'`. */
 export function deriveTonEd25519Seed(bip39Seed: Uint8Array, index: number): Buffer {
   return deriveSlip10Ed25519Seed(bip39Seed, [44, TON_COIN_TYPE, index]);
-}
-
-const TON_MESSAGE_PREFIX = 'TON Signed Message:\n';
-
-/**
- * What `signMessage` signs: SHA-256 of a fixed prefix and the message's UTF-8
- * bytes, as Stellar's SEP-53 does. The same key authorizes W5 requests by
- * signing a 32-byte cell hash, so signing a message's bytes directly would let
- * a crafted 32-byte message stand in for a request; a prefixed digest cannot
- * equal a cell hash without a SHA-256 preimage.
- */
-export function tonMessageHash(message: string): Buffer {
-  return createHash('sha256').update(TON_MESSAGE_PREFIX, 'utf8').update(message, 'utf8').digest();
-}
-
-export class TonSignedMessage extends AbstractSignedMessage {
-  constructor(signature: string) {
-    super(signature);
-  }
 }
 
 export interface TonRequestArgs {
@@ -225,11 +213,7 @@ export class TonWallet extends AbstractBip32StyleSingleAccountWallet {
   }
 
   verifySignature(message: string, signedMessage: AbstractSignedMessage): boolean {
-    try {
-      return signVerify(tonMessageHash(message), Buffer.from(signedMessage.signature, 'hex'), this.publicKey);
-    } catch {
-      return false;
-    }
+    return TonChain.verifySignature(this.publicKey, message, signedMessage);
   }
 
   async handleTransactionPrerequisite(prerequisite: AbstractTransactionPrerequisite): Promise<never> {

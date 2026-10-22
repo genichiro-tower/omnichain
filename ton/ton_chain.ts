@@ -1,3 +1,6 @@
+import type { Cell } from '@ton/core';
+import { signVerify } from '@ton/crypto';
+
 import {
   type BroadcastOpts,
   Chain,
@@ -9,9 +12,10 @@ import {
 import { ChainType } from '../chain_type.ts';
 import { ChainError, ChainErrorKinds } from '../errors.ts';
 import { NetworkType } from '../network_type.ts';
+import type { AbstractSignedMessage } from '../wallet.base.ts';
 import { TonAddress, tonRawAddress } from './ton_address.ts';
 import { TonAsset } from './ton_asset.ts';
-import { tonCommentBody, tonJettonTransferBody } from './ton_messages.ts';
+import { TonSignedMessage, tonCommentBody, tonJettonTransferBody, tonMessageHash, tonW5RequestFields } from './ton_messages.ts';
 import {
   type TonAccountState,
   TonBroadcastUncertainError,
@@ -37,6 +41,13 @@ export const DEFAULT_JETTON_FORWARD_NANOTON = 1n;
  * the masterchain head by a few seconds.
  */
 export const REQUEST_EXPIRY_MARGIN_SECONDS = 60;
+
+function strictHex(value: string, bytes: number, what: string): Buffer {
+  if (!new RegExp(`^[0-9a-fA-F]{${bytes * 2}}$`).test(value)) {
+    throw new ChainError(ChainErrorKinds.InvalidArgument, `A TON ${what} is ${bytes * 2} hex characters`);
+  }
+  return Buffer.from(value, 'hex');
+}
 
 /** Where a signed request stands; see `TonChain.getRequestState`. */
 export type TonRequestState = 'live' | 'expired' | 'consumed';
@@ -198,7 +209,10 @@ export class TonChain extends Chain {
       return new TonUnsignedTransaction({
         chainId: this.chainId,
         walletAddress: req.from,
-        messages: [{ to: req.to, value: resolved.amountMr, body: comment, bounce: false }],
+        // The destination's own form says whether it may bounce: `EQ…` asks for
+        // a refund if it fails, `UQ…` (and the flagless raw form) does not —
+        // the form for an address with no wallet deployed yet.
+        messages: [{ to: req.to, value: resolved.amountMr, body: comment, bounce: new TonAddress(req.to).isBounceable ?? false }],
       });
     }
     return new TonUnsignedTransaction({
@@ -315,12 +329,23 @@ export class TonChain extends Chain {
         // A relay's hash names the relayer's request, not the relayed one: its
         // trace says nothing about whether the target's request executed.
         const root = trace.transactions[0];
-        if (root !== undefined && root.parent === null && root.account !== wallet) {
-          throw new ChainError(
-            ChainErrorKinds.InvalidArgument,
-            `${args.hash} is a request of ${root.account}, not of ${wallet}; for a relayed request pass no hash`,
-            { chainId: this.chainId, txHash: args.hash },
-          );
+        if (root !== undefined && root.parent === null) {
+          if (root.account !== wallet) {
+            throw new ChainError(
+              ChainErrorKinds.InvalidArgument,
+              `${args.hash} is a request of ${root.account}, not of ${wallet}; for a relayed request pass no hash`,
+              { chainId: this.chainId, txHash: args.hash },
+            );
+          }
+          // The provider bound the trace to `hash`, so its root carries the signed request.
+          const signedSeqno = tonW5RequestFields(root.inMsg?.body as Cell).seqno;
+          if (signedSeqno !== args.seqno) {
+            throw new ChainError(
+              ChainErrorKinds.InvalidArgument,
+              `${args.hash} was signed at seqno ${signedSeqno}, not ${args.seqno}`,
+              { chainId: this.chainId, txHash: args.hash },
+            );
+          }
         }
         return 'consumed';
       }
@@ -342,11 +367,36 @@ export class TonChain extends Chain {
     return provider instanceof TonFallbackProvider ? provider.onOneProvider(method, run) : run(provider);
   }
 
-  /** TON addresses do not reveal their key, so a signature cannot be checked against one. */
+  /**
+   * Whether `signedMessage` is `publicKey`'s signature of `message`
+   * (`TonWallet.signMessage`: ed25519 over {@link tonMessageHash}). Needs only
+   * the public key — 32 bytes, or 64 hex characters — as Tron's and
+   * Stellar's do. A signature must be exactly 128 hex characters.
+   */
+  static verifySignature(publicKey: Uint8Array | string, message: string, signedMessage: AbstractSignedMessage): boolean {
+    if (!(signedMessage instanceof TonSignedMessage)) {
+      throw new ChainError(ChainErrorKinds.InvalidArgument, `TonChain expected a TonSignedMessage, got ${signedMessage?.constructor?.name ?? typeof signedMessage}`);
+    }
+    const key = typeof publicKey === 'string' ? strictHex(publicKey, 32, 'public key') : Buffer.from(publicKey);
+    if (key.length !== 32) throw new ChainError(ChainErrorKinds.InvalidArgument, `A TON public key is 32 bytes, got ${key.length}`);
+    if (!/^[0-9a-fA-F]{128}$/.test(signedMessage.signature)) return false;
+    try {
+      return signVerify(tonMessageHash(message), Buffer.from(signedMessage.signature, 'hex'), key);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * TON addresses do not reveal their key, so a signature cannot be checked
+   * against an address alone: use `TonChain.verifySignature` with the
+   * signer's public key (its W5 address is `WalletContractV5R1.create({
+   * publicKey, workchain: 0 }).address`).
+   */
   async verifyMessageSignature(_req: VerifyMessageSignatureRequest): Promise<boolean> {
     throw new ChainError(
       ChainErrorKinds.FeatureNotSupported,
-      'TON message signatures need the signer public key; use TonWallet.verifySignature',
+      'TON message signatures need the signer public key; use TonChain.verifySignature(publicKey, message, signature)',
       { chainId: this.chainId },
     );
   }

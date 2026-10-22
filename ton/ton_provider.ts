@@ -1,6 +1,7 @@
 import type { Cell, Message } from '@ton/core';
 
 import { ChainError, ChainErrorKinds, type ChainErrorKind, type ChainErrorMeta } from '../errors.ts';
+import { tonNormalizedExternalHash } from './ton_messages.ts';
 
 export type TonAccountStatus = 'nonexist' | 'uninit' | 'active' | 'frozen';
 
@@ -347,6 +348,59 @@ export function asRequiredInteger(value: unknown, what: string): number {
   return parsed;
 }
 
+function malformed(what: string): TonProviderError {
+  return new TonProviderError(ChainErrorKinds.RpcError, `Malformed TON provider reply: ${what}`, true);
+}
+
+/** A required object field; a reply without one says nothing definite, so the fallback is asked. */
+export function asRequiredRecord(value: unknown, what: string): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw malformed(`${what} is missing or not an object`);
+  return value as Record<string, unknown>;
+}
+
+/** A required boolean field; see {@link asRequiredRecord}. */
+export function asRequiredBoolean(value: unknown, what: string): boolean {
+  if (typeof value !== 'boolean') throw malformed(`${what} is missing or not a boolean`);
+  return value;
+}
+
+/** A transaction's phases as the chain recorded them, the part of it the judgment reads. */
+export interface TonTransactionPhases {
+  /** Why the compute phase was skipped (`no_state`: the account has no code yet), or `null` when it ran. */
+  computeSkipped: string | null;
+  /** Whether a compute phase that ran succeeded. */
+  computeSuccess: boolean;
+  computeExitCode: number | null;
+  /** The action phase; it runs exactly when the compute phase ran and succeeded. */
+  action: { success: boolean; resultCode: number; skippedActions: number } | null;
+  aborted: boolean;
+}
+
+/**
+ * A transaction succeeds when its compute phase succeeded — or was skipped
+ * only because the account has no code yet — and its action phase, if any,
+ * succeeded without skipping a message. Phases that cannot be what the chain
+ * recorded (a successful compute phase without an action phase) are a
+ * malformed reply, never a success.
+ */
+export function tonTransactionOutcome(phases: TonTransactionPhases): Pick<
+  TonTraceTransaction,
+  'success' | 'skippedActions' | 'aborted' | 'computeExitCode' | 'actionResultCode'
+> {
+  const ran = phases.computeSkipped === null;
+  if (ran && phases.computeSuccess && phases.action === null) throw malformed('a compute phase that succeeded has no action phase');
+  if ((!ran || !phases.computeSuccess) && phases.action !== null) throw malformed('an action phase follows a compute phase that did not succeed');
+  const computeOk = ran ? phases.computeSuccess : phases.computeSkipped === 'no_state';
+  const skippedActions = phases.action?.skippedActions ?? 0;
+  return {
+    success: computeOk && (phases.action === null || (phases.action.success && skippedActions === 0)),
+    skippedActions,
+    aborted: phases.aborted,
+    computeExitCode: ran ? phases.computeExitCode : null,
+    actionResultCode: phases.action?.resultCode ?? null,
+  };
+}
+
 /** An account's status as the provider stated it; anything else says nothing definite. */
 export function asStatedAccountStatus(value: unknown): TonAccountStatus {
   if (value === 'active' || value === 'frozen' || value === 'uninit' || value === 'nonexist') return value;
@@ -422,6 +476,21 @@ export function assertTraceConsistent(source: string, trace: TonTrace): TonTrace
         throw inconsistent(`the trace is complete, but the message ${tx.hash} sent to ${lost.destination} reached no transaction`);
       }
     }
+  }
+  return trace;
+}
+
+/**
+ * The trace a provider returned for `hash` must be that message's: its root
+ * received an external message whose normalized hash is `hash`. A trace still
+ * running may not hold its root yet.
+ */
+export function assertTraceOf(source: string, hash: string, trace: TonTrace): TonTrace {
+  const root = trace.transactions[0];
+  if (root === undefined || root.parent !== null) return trace;
+  const inMsg = root.inMsg;
+  if (inMsg === null || inMsg.source !== null || inMsg.body === null || tonNormalizedExternalHash(root.account, inMsg.body) !== hash) {
+    throw new TonProviderError(ChainErrorKinds.RpcError, `${source} returned the trace of another message than ${hash}`, true);
   }
   return trace;
 }

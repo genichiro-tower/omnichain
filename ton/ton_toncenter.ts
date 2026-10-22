@@ -8,19 +8,24 @@ import {
   type TonHttpEndpoint,
   type TonMasterchainHead,
   type TonProvider,
+  type TonTransactionPhases,
   type TonTrace,
   type TonTraceMessage,
   type TonTraceTransaction,
   TonProviderError,
   asAccountStatus,
   asBigInt,
+  asRequiredBoolean,
   asRequiredInteger,
+  asRequiredRecord,
   asStatedAccountStatus,
   assertTonTxHash,
   assertTraceConsistent,
+  assertTraceOf,
   asRecord,
   definiteError,
   errorMessageOf,
+  tonTransactionOutcome,
   tonBroadcastReply,
   tonHttpJson,
 } from './ton_provider.ts';
@@ -78,9 +83,15 @@ export class ToncenterProvider implements TonProvider {
     return Cell.fromBase64(item.value).beginParse().loadAddress().toRawString();
   }
 
+  /** 0 only on the explicit answer that the jetton wallet has no code; a failed read throws. */
   async getJettonBalance(jettonWallet: string): Promise<bigint> {
-    const result = await this.runGetMethod(jettonWallet, 'get_wallet_data', []);
-    return result === null ? 0n : numAt(result, 0, 'jetton balance');
+    const reply = await this.runGetMethodReply(jettonWallet, 'get_wallet_data', []);
+    const exitCode = Number(reply.exit_code);
+    if (errorMessageOf(reply) === null && exitCode === NO_CODE_EXIT_CODE) return 0n;
+    if (errorMessageOf(reply) !== null || exitCode !== 0 || !Array.isArray(reply.stack)) {
+      throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} could not run get_wallet_data on ${jettonWallet}`, true);
+    }
+    return numAt(reply.stack as ToncenterStackItem[], 0, 'jetton balance');
   }
 
   async sendBoc(boc: string): Promise<void> {
@@ -111,7 +122,7 @@ export class ToncenterProvider implements TonProvider {
     if (finished && missing) {
       throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} returned a finished trace with transactions left out`, true);
     }
-    return assertTraceConsistent(NAME, { complete: finished && !missing, transactions });
+    return assertTraceOf(NAME, hash, assertTraceConsistent(NAME, { complete: finished && !missing, transactions }));
   }
 
   async emulate(boc: string): Promise<TonTrace> {
@@ -191,23 +202,35 @@ function orderedTransactions(tree: unknown, byHash: Record<string, unknown>): { 
   return { transactions: ordered, missing };
 }
 
+/** The phases from TON Center's `description`, every field the judgment reads required. */
+function phasesOf(tx: Record<string, unknown>): TonTransactionPhases {
+  const description = asRequiredRecord(tx.description, 'transaction description');
+  const compute = asRequiredRecord(description.compute_ph, 'compute_ph');
+  const skipped = asRequiredBoolean(compute.skipped, 'compute_ph.skipped');
+  const action = description.action === undefined || description.action === null ? null : asRequiredRecord(description.action, 'action');
+  return {
+    computeSkipped: skipped ? String(compute.reason) : null,
+    computeSuccess: skipped ? false : asRequiredBoolean(compute.success, 'compute_ph.success'),
+    computeExitCode: skipped ? null : asRequiredInteger(compute.exit_code, 'compute_ph.exit_code'),
+    action:
+      action === null
+        ? null
+        : {
+            success: asRequiredBoolean(action.success, 'action.success'),
+            resultCode: asRequiredInteger(action.result_code, 'action.result_code'),
+            skippedActions: asRequiredInteger(action.skipped_actions, 'action.skipped_actions'),
+          },
+    aborted: asRequiredBoolean(description.aborted, 'description.aborted'),
+  };
+}
+
 function toTransaction(tx: Record<string, unknown>, parent: string | null): TonTraceTransaction {
-  const description = asRecord(tx.description ?? {}, 'description');
-  const compute = description.compute_ph === undefined ? null : asRecord(description.compute_ph, 'compute_ph');
-  const action = description.action === undefined || description.action === null ? null : asRecord(description.action, 'action');
-  const computeOk = compute === null || (compute.skipped === true ? compute.reason === 'no_state' : compute.success === true);
-  const skippedActions = action === null ? 0 : Number(action.skipped_actions ?? 0);
-  const actionOk = action === null || (action.success === true && skippedActions === 0);
   const finalized = tx.finality === undefined || tx.finality === 'finalized';
   return {
     hash: base64ToHex(String(tx.hash)),
     parent,
     account: tonRawAddress(String(tx.account)),
-    success: computeOk && actionOk,
-    skippedActions,
-    aborted: description.aborted === true,
-    computeExitCode: compute === null || compute.skipped === true ? null : Number(compute.exit_code),
-    actionResultCode: action === null ? null : Number(action.result_code),
+    ...tonTransactionOutcome(phasesOf(tx)),
     totalFees: asBigInt(tx.total_fees, 'total_fees'),
     origStatus: asAccountStatus(tx.orig_status),
     endStatus: asAccountStatus(tx.end_status),
