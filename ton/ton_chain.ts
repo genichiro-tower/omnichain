@@ -23,7 +23,7 @@ import {
   tonCommentBody,
   tonJettonTransferBody,
   tonMessageHash,
-  tonW5RequestFields,
+  tonWalletRequestFields,
 } from './ton_messages.ts';
 import {
   type TonAccountState,
@@ -436,7 +436,7 @@ export class TonChain extends Chain {
             );
           }
           // The provider bound the trace to `hash`, so its root carries the signed request.
-          const signedSeqno = tonW5RequestFields(root.inMsg?.body as Cell).seqno;
+          const signedSeqno = tonWalletRequestFields(root.inMsg?.body as Cell).seqno;
           if (signedSeqno !== args.seqno) {
             throw new ChainError(
               ChainErrorKinds.InvalidArgument,

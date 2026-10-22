@@ -426,7 +426,15 @@ PR: `getomnichain/omnichain#17` (`genichiro-tower:feature/ton-chain` →
   means the same; a passphrase is refused there (Python ignores it). With a
   path (`derivationPath({ account })`) it stays BIP-39 / SLIP-0010, for
   depositron's vaults; `m/44'/607'/0'` is that scheme's account 0, not
-  Python's key. v4r2 wallets (Python's default) come later.
+  Python's key.
+- **R4, wallet versions:** v4r2 (Python's default) and v3r2 besides W5,
+  with Python's default wallet ids; external requests only (up to 4
+  messages, +2 on each). Gasless relaying (`createInternalRequest`,
+  `tonRelayMessage`) is W5-only and refused for them. Their refusals follow
+  their check order (33 → `NonceTooLow`; expiry 35 / 36 → uncertain), and
+  "rejected before smart-contract execution" (an account that cannot pay)
+  is uncertain on every version. Verified on mainnet: a fresh v4r2 and v3r2
+  wallet each deployed, sent, swept, and refused resends both ways.
 - **R4, signatures:** `TonChain.verifySignature(publicKey, message, sig)`
   verifies with the public key only; signatures must be exactly 128 hex.
 - The root entry exports only `TonAddress`; the family is `./ton`.

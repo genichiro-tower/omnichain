@@ -152,6 +152,35 @@ export function tonW5RequestFields(body: Cell): TonW5RequestFields {
   }
 }
 
+/** What a signed wallet request commits to, whatever its version. */
+export interface TonWalletRequestFields {
+  /** `w5`: op, wallet id, valid_until, seqno first, the signature at the tail. `legacy`: v3r2 / v4r2, the signature first. */
+  layout: 'w5' | 'legacy';
+  walletId: number;
+  validUntil: number;
+  seqno: number;
+}
+
+const ED25519_SIGNATURE_BITS = 512;
+
+/**
+ * The fields of any signed wallet request body the SDK builds. A v3r2 / v4r2
+ * body is the signature, then wallet id, valid_until and seqno, every field
+ * whole bytes; a W5 body leads with its op and is never byte-aligned (its
+ * action-list flags are two bits). Throws `TransactionDecodeFailed` for
+ * anything else.
+ */
+export function tonWalletRequestFields(body: Cell): TonWalletRequestFields {
+  if (body.bits.length % 8 !== 0) return { layout: 'w5', ...tonW5RequestFields(body) };
+  try {
+    const slice = body.beginParse();
+    slice.skip(ED25519_SIGNATURE_BITS);
+    return { layout: 'legacy', walletId: slice.loadUint(32), validUntil: slice.loadUint(32), seqno: slice.loadUint(32) };
+  } catch (err) {
+    throw new ChainError(ChainErrorKinds.TransactionDecodeFailed, `Not a signed wallet request: ${(err as Error).message}`, undefined, err as Error);
+  }
+}
+
 /**
  * A request a wallet signed for a relayer (`TonWallet.createInternalRequest`),
  * with the seqno and `validUntil` it commits to — what
@@ -173,10 +202,15 @@ export function tonInternalRequestOf(body: Cell): TonInternalRequest {
   return { body, seqno: fields.seqno, validUntil: fields.validUntil };
 }
 
+/** The wallet contracts the SDK builds: W5 (v5r1), and v4r2 / v3r2 as the Python SDK has them. */
+export type TonWalletVersion = 'v3r2' | 'v4r2' | 'v5r1';
+
 /** The wallet a relay delivers to: its address and the StateInit that deploys it (a `TonWallet` fits). */
 export interface TonRelayTarget {
   address: string;
   stateInit: StateInit;
+  /** Relaying needs W5; any other version is refused. */
+  version?: TonWalletVersion;
 }
 
 export interface TonRelayMessageArgs {
@@ -198,6 +232,12 @@ export interface TonRelayMessageArgs {
  * status reports that as `request_not_executed`.
  */
 export function tonRelayMessage(args: TonRelayMessageArgs): TonOutMessage {
+  if (args.wallet.version !== undefined && args.wallet.version !== 'v5r1') {
+    throw new ChainError(
+      ChainErrorKinds.FeatureNotSupported,
+      `Only W5 (v5r1) wallets take relayed requests; ${args.wallet.address} is ${args.wallet.version}`,
+    );
+  }
   return {
     to: args.wallet.address,
     value: args.value,

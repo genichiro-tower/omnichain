@@ -11,11 +11,12 @@ import { TON_CENTER_MAINNET_URL, TONAPI_MAINNET_URL, TonMainnet } from '../../to
 import type { TonEmulationResult } from '../../ton_chain.ts';
 import { tonInternalRequestOf, tonRelayMessage } from '../../ton_messages.ts';
 import { TonSignedTransaction } from '../../ton_transactions.ts';
-import type { TonProvider, TonTrace, TonTraceTransaction } from '../../ton_provider.ts';
+import { TonBroadcastUncertainError, type TonProvider, type TonTrace, type TonTraceTransaction } from '../../ton_provider.ts';
 import { ToncenterProvider } from '../../ton_toncenter.ts';
 import { TonapiProvider } from '../../ton_tonapi.ts';
 import { type TonTransactionStatus, summarizeTonTrace } from '../../ton_transaction_status.ts';
 import { TonWallet } from '../../ton_wallet.ts';
+import type { TonWalletVersion } from '../../ton_messages.ts';
 import {
   FetchRecorder,
   type RecordedProviderMethod,
@@ -77,8 +78,8 @@ const chain = TonMainnet;
 const toncenter = new ToncenterProvider({ url: TON_CENTER_MAINNET_URL, apiKey: process.env.TONCENTER_API_KEY ?? '' });
 const tonapi = new TonapiProvider({ url: TONAPI_MAINNET_URL, apiKey: process.env.TONAPI_API_KEY ?? '' });
 const providers: TonProvider[] = [toncenter, tonapi];
-const walletAt = (account: number): TonWallet =>
-  TonWallet.fromMnemonic(env.mnemonic, { derivationPath: TonWallet.derivationPath({ account }) });
+const walletAt = (account: number, version: TonWalletVersion = 'v5r1'): TonWallet =>
+  TonWallet.fromMnemonic(env.mnemonic, { derivationPath: TonWallet.derivationPath({ account }), version });
 const feePayer = walletAt(env.feePayerAccount);
 const recorder = new FetchRecorder();
 const scenarios: Record<string, RecordedScenario> = {};
@@ -466,6 +467,65 @@ describe('TON mainnet (live)', () => {
     expect(status.error?.code).toBe('bounced');
     expect(status.summary?.deliveries.map((d) => d.outcome)).toEqual(['bounced']);
   });
+
+  // v4r2 and v3r2 pay for their own requests; only W5 takes relayed ones.
+  it.each(['v4r2', 'v3r2'] as const)('refuses to sign a relayed request on %s', (version) => {
+    expect(() => walletAt(env.feePayerAccount + 1, version).createInternalRequest({ seqno: 0, messages: [{ to: feePayer.address, value: 1n }] })).toThrow(/W5/);
+  });
+
+  (env.send ? it.each(['v4r2', 'v3r2'] as const) : it.skip.each(['v4r2', 'v3r2'] as const))(
+    'deploys a %s wallet that sends everything back, and refuses a resend',
+    async (version) => {
+      let wallet: TonWallet | null = null;
+      for (let account = env.feePayerAccount + 1; account < env.feePayerAccount + 50 && wallet === null; account++) {
+        const candidate = walletAt(account, version);
+        if ((await chain.getAccountState(candidate.address)).status === 'nonexist') wallet = candidate;
+      }
+      if (wallet === null) throw new Error(`no unused ${version} wallet within 50 accounts`);
+      // Funded from the fee payer, to the non-bounceable form: the wallet is not deployed yet.
+      const fund = await chain.createTransferUnsignedTransaction({ from: feePayer.address, to: wallet.addressUserFriendly({ bounceable: false }), amount: ATTACHED });
+      const funding = await feePayer.signTransaction(fund, chain);
+      await chain.broadcast(funding.boc);
+      expect((await finalStatusRecorded(`${version}_funded`, `the fee payer funding a fresh ${version} wallet`, funding.txHash)).status).toBe(
+        TransactionStatusTypes.Success,
+      );
+      // The wallet deploys itself and sends part back, keeping enough to run a resend.
+      const partial = await chain.createTransferUnsignedTransaction({ from: wallet.address, to: feePayer.addressUserFriendly({ bounceable: false }), amount: ATTACHED / 2n });
+      const signed = await wallet.signTransaction(partial, chain);
+      expect(signed.seqno).toBe(0);
+      expect((await chain.emulate(signed.boc)).success).toBe(true);
+      await chain.broadcast(signed.boc);
+      console.log(`sent ${signed.txHash} (${version} deploys and sends half back)`);
+      const status = await finalStatusRecorded(`${version}_deploy_send`, `a fresh ${version} wallet deploying itself and sending half back`, signed.txHash);
+      expect(status.status).toBe(TransactionStatusTypes.Success);
+      expect((await chain.getAccountState(wallet.address)).status).toBe('active');
+      expect(await chain.getSeqno(wallet.address)).toBe(1);
+      await expect(chain.getRequestState({ wallet: wallet.address, seqno: signed.seqno, validUntil: signed.validUntil, hash: signed.txHash })).resolves.toBe(
+        'consumed',
+      );
+      // Resent while the wallet can pay to run it: the v3r2 / v4r2 seqno check (33) refuses it.
+      const resent = await toncenter.sendBoc(signed.boc).then(() => null, (e: unknown) => e);
+      console.log(`${version} resend: ${(resent as Error | null)?.message.slice(0, 200) ?? 'accepted'}`);
+      if (resent !== null) expect(resent).toMatchObject({ kind: ChainErrorKinds.NonceTooLow });
+      expect(await chain.getSeqno(wallet.address)).toBe(1);
+
+      // Then everything back (send mode 128 + 2), leaving the wallet empty.
+      const sweep = await wallet.signTransaction(
+        await chain.createTransferUnsignedTransaction({ from: wallet.address, to: feePayer.addressUserFriendly({ bounceable: false }), isFullBalance: true }),
+        chain,
+      );
+      expect(sweep.seqno).toBe(1);
+      await chain.broadcast(sweep.boc);
+      expect((await finalStatusRecorded(`${version}_sweep`, `the ${version} wallet sending everything back`, sweep.txHash)).status).toBe(
+        TransactionStatusTypes.Success,
+      );
+      // An emptied wallet refuses to even run a resend: possibly landed, never definite.
+      const toEmpty = await toncenter.sendBoc(sweep.boc).then(() => null, (e: unknown) => e);
+      console.log(`${version} resend to the emptied wallet: ${(toEmpty as Error | null)?.message.slice(0, 200) ?? 'accepted'}`);
+      if (toEmpty !== null) expect(toEmpty).toBeInstanceOf(TonBroadcastUncertainError);
+      expect(await chain.getSeqno(wallet.address)).toBe(2);
+    },
+  );
 
   (env.send ? it : it.skip)('spent no more than the cap', async () => {
     const spent = startBalance - (await chain.getAccountState(feePayer.address)).balance;

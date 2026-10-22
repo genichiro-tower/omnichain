@@ -14,7 +14,7 @@ import {
 } from '../transaction_json.ts';
 import { UnsignedTransaction } from '../unsigned_transaction.ts';
 import { tonRawAddress } from './ton_address.ts';
-import { type TonOutMessage, tonNormalizedExternalHash, tonOutActions, tonW5RequestFields } from './ton_messages.ts';
+import { type TonOutMessage, tonNormalizedExternalHash, tonOutActions, tonW5RequestFields, tonWalletRequestFields } from './ton_messages.ts';
 
 /**
  * A request a wallet will send itself: its messages, and optionally how long
@@ -36,7 +36,7 @@ export class TonUnsignedTransaction extends UnsignedTransaction {
 }
 
 /**
- * A signed W5 external request: its BOC, its normalized hash (the
+ * A signed external wallet request (W5, v4r2 or v3r2): its BOC, its normalized hash (the
  * transaction id), and — read from the signed body itself, so they survive a
  * JSON round trip — the wallet, seqno and `validUntil` it commits to, which
  * `TonChain.getRequestState` takes.
@@ -89,11 +89,11 @@ export class TonSignedTransaction extends AbstractSignedTransaction {
 
 registerJsonTransactionType(TonSignedTransaction);
 
-/** A signed W5 external request read back from its base64 BOC. */
+/** A signed external wallet request (W5, v4r2 or v3r2) read back from its base64 BOC. */
 export function tonExternalRequestOf(boc: string): { walletAddress: string; hash: string; seqno: number; validUntil: number } {
   const message = externalMessageOf(boc);
-  const fields = tonW5RequestFields(message.body);
-  if (fields.authType !== 'external') {
+  const fields = tonWalletRequestFields(message.body);
+  if (fields.layout === 'w5' && tonW5RequestFields(message.body).authType !== 'external') {
     throw new ChainError(ChainErrorKinds.TransactionDecodeFailed, 'Not a signed W5 external request: it is an internal one');
   }
   const walletAddress = message.info.dest.toRawString();

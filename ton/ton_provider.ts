@@ -296,11 +296,25 @@ const EXTERNAL_MESSAGE_REFUSED = /cannot apply external message/i;
 const EXTERNAL_MESSAGE_DUPLICATE = /duplicate message/i;
 const REFUSAL_EXIT_CODE = /exit\s*code\s*[=:]?\s*(-?\d+)/i;
 /**
- * W5R1 checks the signature, then the seqno, then the wallet id, then
+ * The wallets' refusals of an external request, by exit code.
+ *
+ * W5R1 checks the signature, then the seqno (133), the wallet id, then
  * `valid_until`: a message that already landed fails on the seqno, and only
  * there — every later refusal means the seqno still matched.
+ *
+ * v3r2 and v4r2 check `valid_until` first (v3r2: 35, which is also its bad
+ * signature; v4r2: 36), then the seqno (33), the wallet id (34), the
+ * signature (35). An expiry refusal therefore says nothing about whether the
+ * message landed earlier.
  */
-const W5_INVALID_SEQNO = 133;
+const SEQNO_MOVED_EXIT_CODES = new Set([133, 33]);
+/**
+ * The account refused to run the request at all — typically it holds nothing
+ * to pay for it, as a wallet that sent everything away does. No check ran, so
+ * this says nothing about whether the same request landed earlier.
+ */
+const REFUSED_BEFORE_EXECUTION = /before smart-contract execution/i;
+const MAYBE_LANDED_EXIT_CODES = new Set([35, 36]);
 
 /**
  * The reply to a broadcast, read for what the lite server said rather than
@@ -308,10 +322,13 @@ const W5_INVALID_SEQNO = 133;
  * TonAPI as 500 or 406):
  * - "duplicate message": the network already has this exact message, so the
  *   broadcast succeeded;
- * - "cannot apply external message": the wallet does not accept it now. On
- *   W5's seqno check this is `NonceTooLow` — this message or another with its
- *   seqno already landed, so read the status before signing again; any other
- *   refusal is a definite `BroadcastRejected`.
+ * - "cannot apply external message": the wallet does not accept it now. On a
+ *   seqno check (W5 133, v3r2 / v4r2 33) this is `NonceTooLow` — this
+ *   message or another with its seqno already landed, so read the status
+ *   before signing again; on a v3r2 / v4r2 expiry (35, 36), or a refusal "before
+ *   smart-contract execution" (an account that cannot pay to run it), it may
+ *   have landed earlier, so it is `BroadcastUncertain`; any other refusal is
+ *   a definite `BroadcastRejected`.
  */
 export async function tonBroadcastReply(provider: string, reply: Promise<unknown>): Promise<unknown> {
   try {
@@ -320,8 +337,22 @@ export async function tonBroadcastReply(provider: string, reply: Promise<unknown
     if (!(err instanceof TonProviderError)) throw err;
     if (EXTERNAL_MESSAGE_DUPLICATE.test(err.message)) return {};
     if (EXTERNAL_MESSAGE_REFUSED.test(err.message)) {
+      if (REFUSED_BEFORE_EXECUTION.test(err.message)) {
+        throw new TonBroadcastUncertainError(
+          `${provider} refused the message before running it (the account cannot pay for it); it may be a request that landed earlier: ${err.message}`,
+          undefined,
+          err,
+        );
+      }
       const exitCode = Number(REFUSAL_EXIT_CODE.exec(err.message)?.[1]);
-      if (exitCode === W5_INVALID_SEQNO) {
+      if (MAYBE_LANDED_EXIT_CODES.has(exitCode)) {
+        throw new TonBroadcastUncertainError(
+          `${provider} refused the message as expired (v3r2 / v4r2 check that first, so it may have landed earlier) or for its signature: ${err.message}`,
+          undefined,
+          err,
+        );
+      }
+      if (SEQNO_MOVED_EXIT_CODES.has(exitCode)) {
         throw new TonProviderError(
           ChainErrorKinds.NonceTooLow,
           `${provider} refused the message: the wallet's seqno has moved past it, so it or another request with its seqno landed: ${err.message}`,

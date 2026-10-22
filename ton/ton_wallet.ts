@@ -1,8 +1,8 @@
 import { createHmac, pbkdf2Sync } from 'node:crypto';
 
-import { type Cell, type StateInit, beginCell, external, storeMessage } from '@ton/core';
+import { type Cell, SendMode, type StateInit, beginCell, external, storeMessage, storeMessageRelaxed } from '@ton/core';
 import { keyPairFromSeed, sign } from '@ton/crypto';
-import { WalletContractV5R1 } from '@ton/ton';
+import { WalletContractV3R2, WalletContractV4, WalletContractV5R1 } from '@ton/ton';
 
 import { mnemonicToSeedBip39 } from '../bip39.ts';
 import type { Chain } from '../chain.base.ts';
@@ -16,6 +16,7 @@ import { TonChain } from './ton_chain.ts';
 import {
   type TonInternalRequest,
   type TonOutMessage,
+  type TonWalletVersion,
   TonSignedMessage,
   tonMessageHash,
   tonNormalizedExternalHash,
@@ -53,6 +54,10 @@ export function deriveSlip10Ed25519Seed(bip39Seed: Uint8Array, path: readonly nu
 export function deriveTonEd25519Seed(bip39Seed: Uint8Array, index: number): Buffer {
   return deriveSlip10Ed25519Seed(bip39Seed, [44, TON_COIN_TYPE, index]);
 }
+
+export const TON_WALLET_VERSIONS: readonly TonWalletVersion[] = ['v3r2', 'v4r2', 'v5r1'];
+/** v3r2 / v4r2 send at most four messages per request. */
+export const TON_LEGACY_MAX_MESSAGES = 4;
 
 /** The path the Python SDK accepts as a marker for TON's own scheme; it derives nothing. */
 export const TON_PYTHON_MARKER_PATH = "m/44'/607'/0'/0/0";
@@ -101,19 +106,32 @@ export interface TonExternalRequest {
  */
 export class TonWallet extends AbstractBip32StyleSingleAccountWallet {
   readonly publicKey: Buffer;
-  readonly contract: WalletContractV5R1;
+  /** The wallet contract: W5 (v5r1, the default), or v4r2 / v3r2 as the Python SDK builds them. */
+  readonly version: TonWalletVersion;
+  readonly contract: WalletContractV5R1 | WalletContractV4 | WalletContractV3R2;
   readonly #secretKey: Buffer;
   private readonly _address: string;
 
-  constructor(ed25519Seed: Uint8Array) {
+  constructor(ed25519Seed: Uint8Array, opts: { version?: TonWalletVersion } = {}) {
     super();
     if (ed25519Seed.length !== 32) {
       throw new ChainError(ChainErrorKinds.InvalidArgument, `A TON ed25519 seed is 32 bytes, got ${ed25519Seed.length}`);
     }
+    const version = opts.version ?? 'v5r1';
+    if (!TON_WALLET_VERSIONS.includes(version)) {
+      throw new ChainError(ChainErrorKinds.InvalidArgument, `TON wallet version must be one of ${TON_WALLET_VERSIONS.join(', ')}, got ${String(version)}`);
+    }
     const keyPair = keyPairFromSeed(Buffer.from(ed25519Seed));
     this.publicKey = keyPair.publicKey;
     this.#secretKey = keyPair.secretKey;
-    this.contract = WalletContractV5R1.create({ workchain: 0, publicKey: keyPair.publicKey });
+    this.version = version;
+    // v3r2 / v4r2 take their default wallet id (698983191 + workchain), as the Python SDK's do.
+    this.contract =
+      version === 'v5r1'
+        ? WalletContractV5R1.create({ workchain: 0, publicKey: keyPair.publicKey })
+        : version === 'v4r2'
+          ? WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey })
+          : WalletContractV3R2.create({ workchain: 0, publicKey: keyPair.publicKey });
     this._address = this.contract.address.toRawString();
   }
 
@@ -147,7 +165,10 @@ export class TonWallet extends AbstractBip32StyleSingleAccountWallet {
    *   SLIP-0010 at that path — many accounts from one mnemonic. Note that
    *   `m/44'/607'/0'` is account 0 of this scheme, not Python's key.
    */
-  static fromMnemonic(mnemonicStr: string, opts: { derivationPath?: string; passphrase?: string } = {}): TonWallet {
+  static fromMnemonic(
+    mnemonicStr: string,
+    opts: { derivationPath?: string; passphrase?: string; version?: TonWalletVersion } = {},
+  ): TonWallet {
     if (opts.derivationPath === undefined || opts.derivationPath === TON_PYTHON_MARKER_PATH) {
       if (opts.passphrase !== undefined && opts.passphrase !== '') {
         throw new ChainError(
@@ -155,10 +176,10 @@ export class TonWallet extends AbstractBip32StyleSingleAccountWallet {
           "TON's own mnemonic scheme takes no passphrase here (the Python SDK ignores it); pass a derivationPath to use one",
         );
       }
-      return new TonWallet(deriveTonNativeSeed(mnemonicStr));
+      return new TonWallet(deriveTonNativeSeed(mnemonicStr), { version: opts.version });
     }
     const index = TonWallet.indexFromDerivationPath(opts.derivationPath);
-    return new TonWallet(deriveTonEd25519Seed(mnemonicToSeedBip39(mnemonicStr, opts.passphrase ?? ''), index));
+    return new TonWallet(deriveTonEd25519Seed(mnemonicToSeedBip39(mnemonicStr, opts.passphrase ?? ''), index), { version: opts.version });
   }
 
   static derivationPath(args: { account?: number } = {}): string {
@@ -183,18 +204,24 @@ export class TonWallet extends AbstractBip32StyleSingleAccountWallet {
    * A request this wallet sends itself, as an external message. Pass `deploy`
    * while the wallet is not deployed, so the message carries its StateInit.
    *
-   * W5 sends external requests with "ignore errors" (+2) on every message, so
-   * a message that cannot be sent is skipped rather than failing the others.
+   * Every version sends external requests with "ignore errors" (+2) on every
+   * message (W5 forces it; v3r2 / v4r2 get it here), so a message that cannot
+   * be sent is skipped rather than failing the others — a v3r2 / v4r2
+   * request whose action phase failed would keep its seqno and could land
+   * again. v3r2 / v4r2 carry at most 4 messages.
    */
   createExternalRequest(args: TonRequestArgs & { deploy?: boolean }): TonExternalRequest {
     const validUntil = args.validUntil ?? defaultValidUntil();
-    const body = this.contract.createRequest({
-      seqno: args.seqno,
-      timeout: validUntil,
-      secretKey: this.#secretKey,
-      authType: 'external',
-      actions: tonOutActions(args.messages),
-    });
+    const body =
+      this.contract instanceof WalletContractV5R1
+        ? this.contract.createRequest({
+            seqno: args.seqno,
+            timeout: validUntil,
+            secretKey: this.#secretKey,
+            authType: 'external',
+            actions: tonOutActions(args.messages),
+          })
+        : this.legacyExternalBody(args.seqno, validUntil, args.messages);
     const message = external({ to: this.contract.address, init: args.deploy === true ? this.stateInit : undefined, body });
     return {
       boc: beginCell().store(storeMessage(message)).endCell().toBoc().toString('base64'),
@@ -206,10 +233,19 @@ export class TonWallet extends AbstractBip32StyleSingleAccountWallet {
 
   /**
    * A signed internal request (op `0x73696e74`) for a relayer to deliver with
-   * `tonRelayMessage`. Send modes are kept as given, so without "ignore errors"
-   * the request's messages leave all together or not at all.
+   * `tonRelayMessage` — the gasless path, where another account pays. W5
+   * (v5r1) only: v3r2 / v4r2 wallets accept requests only as external
+   * messages they pay for themselves. Send modes are kept as given, so
+   * without "ignore errors" the request's messages leave all together or not
+   * at all.
    */
   createInternalRequest(args: TonRequestArgs): TonInternalRequest {
+    if (!(this.contract instanceof WalletContractV5R1)) {
+      throw new ChainError(
+        ChainErrorKinds.FeatureNotSupported,
+        `Relayed (gasless) requests need a W5 (v5r1) wallet; this one is ${this.version}`,
+      );
+    }
     const validUntil = args.validUntil ?? defaultValidUntil();
     const body = this.contract.createRequest({
       seqno: args.seqno,
@@ -219,6 +255,27 @@ export class TonWallet extends AbstractBip32StyleSingleAccountWallet {
       actions: tonOutActions(args.messages),
     });
     return { body, seqno: args.seqno, validUntil };
+  }
+
+  /**
+   * A v3r2 / v4r2 signed body: the signature, then wallet id, valid_until,
+   * seqno, (v4r2: op 0, "send messages"), and each message with its own send
+   * mode (+2) — what `@ton/ton`'s transfers build, with per-message modes.
+   */
+  private legacyExternalBody(seqno: number, validUntil: number, messages: readonly TonOutMessage[]): Cell {
+    if (messages.length > TON_LEGACY_MAX_MESSAGES) {
+      throw new ChainError(ChainErrorKinds.InvalidArgument, `A ${this.version} request carries at most ${TON_LEGACY_MAX_MESSAGES} messages, got ${messages.length}`);
+    }
+    const signing = beginCell()
+      .storeUint((this.contract as WalletContractV4 | WalletContractV3R2).walletId, 32)
+      .storeUint(validUntil, 32)
+      .storeUint(seqno, 32);
+    if (this.version === 'v4r2') signing.storeUint(0, 8);
+    for (const action of tonOutActions(messages)) {
+      signing.storeUint(action.mode | SendMode.IGNORE_ERRORS, 8).storeRef(beginCell().store(storeMessageRelaxed(action.outMsg)).endCell());
+    }
+    const signature = sign(signing.endCell().hash(), this.#secretKey);
+    return beginCell().storeBuffer(signature).storeBuilder(signing).endCell();
   }
 
   /** Signs `transaction` as an external request, reading the seqno and deployment from `chain`. */

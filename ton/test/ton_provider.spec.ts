@@ -423,7 +423,7 @@ describe('trace normalization', () => {
 });
 
 describe('broadcast', () => {
-  const REFUSAL = 'cannot apply external message to current state : inbound external message rejected by transaction 420B98...: exitcode=33';
+  const REFUSAL = 'cannot apply external message to current state : inbound external message rejected by transaction 420B98...: exitcode=134';
 
   it('reads the lite server refusing a message as definite on both providers', async () => {
     stubFetch(() => ({ status: 500, body: { error: `LITE_SERVER_UNKNOWN: ${REFUSAL}`, code: 500 } }));
