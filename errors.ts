@@ -67,6 +67,8 @@ export const ChainErrorKinds = {
   InvalidTokenIdentifier: 'invalid_token_identifier',
   InvalidArgument: 'invalid_argument',
   BroadcastRejected: 'broadcast_rejected',
+  /** The broadcast failed in a way that does not tell whether the transaction reached the network; read its status before signing again. */
+  BroadcastUncertain: 'broadcast_uncertain',
   NonceTooLow: 'nonce_too_low',
   InsufficientFunds: 'insufficient_funds',
   BlockhashExpired: 'blockhash_expired',
@@ -111,6 +113,10 @@ export function isBlockhashExpiredError(err: unknown): err is ChainError {
 
 export function isSimulationError(err: unknown): err is ChainError {
   return isChainError(err, ChainErrorKinds.SimulationFailed);
+}
+
+export function isBroadcastUncertainError(err: unknown): err is ChainError {
+  return isChainError(err, ChainErrorKinds.BroadcastUncertain);
 }
 
 export function isNonceError(err: unknown): err is ChainError {

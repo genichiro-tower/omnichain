@@ -26,5 +26,5 @@ export * from './unsigned_transaction.ts';
 export * from './wallet.base.ts';
 export * from './evm/index.ts';
 export * from './solana/index.ts';
-export * from './ton/index.ts';
+export * from './ton/ton_address.ts';
 export * from './utxo/index.ts';

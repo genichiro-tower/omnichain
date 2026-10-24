@@ -36,3 +36,40 @@ describe('TonAddress', () => {
     expect(evm.equals(ton)).toBe(false);
   });
 });
+
+describe('TonAddress forms', () => {
+  // One W5R1 account in its three forms (checked against @ton/core's Address).
+  const RAW = '0:9d1e1843624c4d175a695a8c2de8a5a61f03b93336e8caa4e164bf6cbbab205e';
+  const BOUNCEABLE = 'EQCdHhhDYkxNF1ppWowt6KWmHwO5MzboyqThZL9su6sgXsq8';
+  const NON_BOUNCEABLE = 'UQCdHhhDYkxNF1ppWowt6KWmHwO5MzboyqThZL9su6sgXpd5';
+
+  it('gives one canonical raw form for every form of one account', () => {
+    for (const form of [RAW, RAW.toUpperCase(), BOUNCEABLE, NON_BOUNCEABLE]) {
+      expect(new TonAddress(form).canonical()).toBe(RAW);
+    }
+    expect(new TonAddress(BOUNCEABLE).equals(new TonAddress(NON_BOUNCEABLE))).toBe(true);
+  });
+
+  it('converts to either user-friendly form', () => {
+    const address = new TonAddress(RAW);
+    expect(address.toUserFriendly()).toBe(BOUNCEABLE);
+    expect(address.toUserFriendly({ bounceable: false })).toBe(NON_BOUNCEABLE);
+  });
+
+  it('reports the bounceable flag the input carried', () => {
+    expect(new TonAddress(BOUNCEABLE).isBounceable).toBe(true);
+    expect(new TonAddress(NON_BOUNCEABLE).isBounceable).toBe(false);
+    expect(new TonAddress(RAW).isBounceable).toBeNull();
+  });
+
+  it('keeps the masterchain workchain through a round trip', () => {
+    const masterchain = new TonAddress(VALID_TON_RAW);
+    expect(new TonAddress(masterchain.toUserFriendly()).canonical()).toBe(VALID_TON_RAW);
+  });
+
+  it('round-trips the test-only flag', () => {
+    const testOnly = new TonAddress(RAW).toUserFriendly({ bounceable: false, testOnly: true });
+    expect(new TonAddress(testOnly).isTestOnly).toBe(true);
+    expect(new TonAddress(testOnly).canonical()).toBe(RAW);
+  });
+});

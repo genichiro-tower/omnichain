@@ -1,6 +1,6 @@
 {
   "name": "@getomnichain/omnichain",
-  "version": "0.6.3",
+  "version": "0.7.0",
   "description": "Multi-chain SDK for EVM, Solana, UTXO (BTC/LTC/DOGE/DASH/ZEC/BCH), Stellar, Tron, and TON. TypeScript parity port of omnichain-py.",
   "keywords": [
     "omnichain",
@@ -80,6 +80,7 @@
     "build:cjs": "tsc -p tsconfig.build.cjs.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --experimental-vm-modules --no-warnings node_modules/jest/bin/jest.js",
+    "test:live:ton": "node --experimental-vm-modules --no-warnings node_modules/jest/bin/jest.js -c jest.live.config.mjs ton/test/live",
     "release": "bash scripts/release.sh",
     "rango:refresh": "node scripts/refresh-rango-fixture.mjs",
     "prepublishOnly": "npm test && npm run build"
@@ -88,6 +89,9 @@
     "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": "^1.98.0",
     "@stellar/stellar-sdk": "^15.1.0",
+    "@ton/core": "^0.63.1",
+    "@ton/crypto": "^3.3.0",
+    "@ton/ton": "^16.3.0",
     "axios": "^1.7.0",
     "bitcoinjs-lib": "^7.0.1",
     "bitcoinjs-message": "^2.2.0",

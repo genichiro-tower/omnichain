@@ -8,6 +8,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-10-21
+
+TON: a chain, W5 wallets, and requests one wallet signs and another delivers and pays for. Mainnet only. See `docs/ton.md`.
+
+### Added
+
+- **`TonChain` and `TonMainnet`** (`@getomnichain/omnichain/ton`), read through TON Center v3 with TonAPI as the fallback. A call goes to TonAPI only when TON Center failed without an answer (transport, timeout, 429, 5xx). Every provider needs a key; a missing one is read from `TONCENTER_API_KEY` / `TONAPI_API_KEY`. A trace whose receivers disagree with their senders, or with a transaction left out, is refused as a provider failure and read from TonAPI instead.
+- **`ChainErrorKinds.BroadcastUncertain`** and `isBroadcastUncertainError`: a broadcast that may have reached the network.
+- **`TonBroadcastUncertainError`** (kind `BroadcastUncertain`): a broadcast that may have reached the network although it failed — a provider failed without an answer, with no fallback or with the fallback then refusing it. It carries `meta.txHash`; before signing again, wait for `getRequestState` to say `expired` (`consumed`: it landed). The lite server refusing a message on W5's seqno check is `NonceTooLow` (it, or another request with its seqno, landed — what a resend of a landed message gets); any other refusal is `BroadcastRejected`; "duplicate message" counts as sent. All come as HTTP 500 and are read by their text. A TON Center trace that is finished but leaves a transaction out is read from TonAPI. The masterchain head and a deployed wallet's seqno are never read as 0 or `NaN` on a failed or malformed reply, and an account is `nonexist` only when the provider says so. `getSeqno` reads the wallet's get-method live rather than gating on the indexed state, which can trail a deploy.
+- **`TonChain.getRequestState({ wallet, seqno, validUntil, hash? })`** → `live | expired | consumed`, the check before signing a replacement. `consumed`: the wallet's seqno moved past the request, or it has a trace — never re-sign. `expired`: chain time (the masterchain head's) a minute past `validUntil`, the seqno not past it and no trace — safe to replace. `live`: it can still execute — a relayed (internal) request that failed included, since W5 keeps its seqno only when the transaction succeeds and anyone can deliver it again until `validUntil`. All reads come from one provider; a failed read throws.
+- **Signed requests keep what they commit to**: `createInternalRequest` returns `{ body, seqno, validUntil }` (`tonRelayMessage` takes it); `TonSignedTransaction` reads `walletAddress`, `seqno` and `validUntil` from its signed body, and round-trips through `toJson` / `fromJson` (registered). `tonW5RequestFields` / `tonInternalRequestOf` read them from any signed W5 body.
+- **`assertTraceConsistent`** runs in both providers and in the judgment: a trace with a gap — a transaction without an incoming message or a parent, or in a complete trace a sent message no transaction received — is a retryable provider error read from TonAPI, never an undelivered message. An emulation cut short is refused the same way. Transaction ids are refused unless 64 lowercase hex, everywhere; "no trace" is read only from the providers' explicit answers. A TonAPI trace that is its prediction for a message in flight (`emulated`) is never read as on chain.
+- **Jetton assets and metadata**: `TonChain.resolveAsset` reads a jetton's symbol and decimals from its TEP-64 metadata (`get_jetton_data`, on-chain and off-chain over https), as Python and the Tron and Stellar ports do; `getJettonMetadata`, `createAsset`, `getJettonAsset`, `getAssetExplorerUrl`; `ton_assets.ts` with `TON_TON`, `TON_USDT`, `TON_MAINNET_STABLECOINS_PEG`. Providers gain `getJettonContent` and `getJettonWalletData`.
+- **Transfers** (`TonTransferOptions`): `amountHr` for jettons; `isFullBalance` (native: send mode 130, value 0; jettons: the whole jetton balance); overrides for `bounce`, `sendMode`, `jettonAttachedNanoton`, `forwardTonAmountNanoton`. Native bounce defaults to bounceable only for an `EQ…` address that is deployed.
+- **Jetton balance changes** in the status and `emulate`, per owner in the jetton asset, each transfer checked against its master. `jettonCredits` counts a credit unless the jetton wallet aborted.
+- **`TonChain.verifySignature(publicKey, message, signature)`**: a TON message signature checked with the public key only, as on Tron and Stellar; strict 128-hex signatures.
+- **Reads never fail open**: missing phase data (TON Center's `description`, TonAPI judged from the transaction BOC) is a retryable malformed reply, never a successful transaction; a jetton wallet reads 0 only when it has no code; a trace must be the requested message's.
+- **The jetton explorer link** uses the master's bounceable (`EQ…`) form.
+- **`TonWallet.signMessage` / `verifySignature`** sign `tonMessageHash(message)`, SHA-256 of `"TON Signed Message:\n"` and the message (as SEP-53 does for Stellar), so a signed message can never pass for a W5 request signature.
+- **Workchain -1** (`TonWallet` / `fromMnemonic` `workchain`), with the Python SDK's wallet ids on both workchains (W5's context names workchain 0; v3r2 / v4r2 use 698983191), so -1 wallets match the Python SDK's addresses.
+- **Wallet versions v4r2 and v3r2** (`TonWallet` / `fromMnemonic` `version`), as the Python SDK has them: external requests (up to 4 messages, "ignore errors" on each); relayed (gasless) requests stay W5-only and are refused for them. Their broadcast refusals are read by their check order (seqno 33 → `NonceTooLow`; expiry 35 / 36 → `BroadcastUncertain`), and a refusal "before smart-contract execution" (an account that cannot pay) is `BroadcastUncertain` on every version. `tonWalletRequestFields` reads any of the three bodies.
+- **`TonWallet.fromMnemonic` without a path** uses TON's own mnemonic scheme — the key and W5 address the Python SDK and TON wallets give for the same words (`deriveTonNativeSeed`); Python's marker path `m/44'/607'/0'/0/0` means the same, and a passphrase is refused there. With a path it derives BIP-39 / SLIP-0010 as before.
+- **`TonWallet`**: W5R1 on workchain 0, its key derived from a BIP-39 mnemonic with SLIP-0010 ed25519 at `m/44'/607'/<account>'`. `createExternalRequest` (sent and paid by the wallet itself) and `createInternalRequest` (signed for a relayer, op `0x73696e74`).
+- **Relaying:** `tonRelayMessage({ wallet, request, value, deploy })` delivers a wallet's signed request and, with `deploy`, its StateInit, so the relayer deploys it on first use and pays every fee.
+- **Messages:** `TonOutMessage`, `tonCommentBody`, `tonJettonTransferBody` (TEP-74), `tonNormalizedExternalHash` (TEP-467, the transaction id).
+- **Reads:** account state, seqno, TON and jetton balances, `getJettonWalletAddress`.
+- **`TonChain.emulate`**: the whole trace of an external message, signature ignored — fees, success, failed transactions, bounced messages, TON balance changes and jetton credits.
+- **`TonTransactionStatus`**: final once the trace is complete and every transaction is in a masterchain-referenced block, with no confirmation count. `Failed` when the request did not do what it was signed for — the sending (or relayed) wallet failed, skipped a message or did not execute the request, or a message it sent bounced, or (a jetton transfer) was not sent on, or reached a receiver that failed without sending it back (`failed`, code `receiver_failed`: nothing returned); `bounced` only when the trace has the bounce. `summary.deliveries` gives each message's outcome. Failures further down the trace do not fail it.
+
+### Changed
+
+- **`TonAddress.canonical()`** is the raw form with a lowercase hash, so every form of one account compares equal (it returned the input before). It also converts to either user-friendly form and reports the input's flags.
+- **The root entry exports only `TonAddress`** from the TON family, so it loads no `@ton/*` dependency.
+
+### Dependencies
+
+- `@ton/core` ^0.63, `@ton/crypto` ^3.3, `@ton/ton` ^16.3.
+
 ## [0.6.3] — 2026-10-05
 
 Tron: a transaction status rango-intents can trust, and local signing for depositron (RIN-317). No new node calls; building a transaction makes one fewer.
