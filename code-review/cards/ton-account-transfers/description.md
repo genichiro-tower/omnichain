@@ -94,8 +94,32 @@ notifications.
 3. `getAccountTransfers`.
 4. Tests (unit with recorded replies; live on mainnet), docs, CHANGELOG, 0.7.1.
 
+# Verification
+
+- Unit: provider reads against replies recorded from both providers on
+  mainnet (a trace found from its middle transaction, account transactions
+  after a cursor, last lt); `getAccountTransfers` on a real relay trace (both
+  accounts, the real transfer's comment read) and on built jetton, impostor,
+  bounce and finality cases. 1984 tests pass; build clean.
+- Live (read-only, 2026-10-25): AC1 and AC2 alike on both providers; AC3 on
+  recent real USDT transfers, verified the same through TonAPI alone.
+
 <!-- ======================= PART C - DEVIATIONS ======================= -->
 
 # Deviations
 
+- `getLastTransactionLt` on TonAPI: its raw account is 404 for an account that
+  does not exist even when it had transactions (a bounced message), so the
+  newest transaction decides there; 0 needs none and `nonexist` stated.
+- The live AC4 checks (the relay read back, the bounced vault's lt alike on
+  both providers) are written but not run: the fee payer holds 0.1885 TON,
+  under the 0.2 a sending run requires. Unit tests on recorded mainnet
+  replies cover both. The live suite now asks for funds only when it sends,
+  and retries provider outages in its TonAPI cross-checks.
+- TonAPI's free tier (1 RPS) rate-limits trace reads (one masterchain-block
+  lookup per shard block); reads should go through TON Center first.
+
 # Follow-ups raised
+
+- Pace or batch TonAPI's masterchain-block lookups so its free tier can serve
+  trace reads as a fallback.

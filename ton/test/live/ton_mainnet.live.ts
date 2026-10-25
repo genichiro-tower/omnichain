@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { parseEnv } from 'node:util';
 
@@ -8,7 +9,7 @@ import { CHAIN_ID_TON_MAINNET } from '../../../chain_ids.ts';
 import { ChainErrorKinds } from '../../../errors.ts';
 import { TransactionStatusTypes } from '../../../transaction_status.ts';
 import { TON_CENTER_MAINNET_URL, TONAPI_MAINNET_URL, TonMainnet } from '../../ton_chains.ts';
-import type { TonEmulationResult } from '../../ton_chain.ts';
+import { TonChain, type TonEmulationResult } from '../../ton_chain.ts';
 import { tonInternalRequestOf, tonRelayMessage } from '../../ton_messages.ts';
 import { TonSignedTransaction } from '../../ton_transactions.ts';
 import { TonBroadcastUncertainError, type TonProvider, type TonTrace, type TonTraceTransaction } from '../../ton_provider.ts';
@@ -165,6 +166,29 @@ async function providerRecorded(
   return outcome.result;
 }
 
+/** Retries a call that failed without an answer (a rate limit, an outage) — the free tiers are tight for a long run. */
+async function retryingOutages<T>(call: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await call();
+    } catch (err) {
+      if (attempt >= 4 || (err as { retryable?: boolean }).retryable !== true) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 3_000 * attempt));
+    }
+  }
+}
+
+/** The provider's trace holding `txHash` once it is complete. */
+async function completeTraceBy(provider: TonProvider, txHash: string): Promise<TonTrace> {
+  const deadline = Date.now() + STATUS_TIMEOUT_MS;
+  for (;;) {
+    const trace = await provider.getTraceByTransaction(txHash);
+    if (trace?.complete === true) return trace;
+    if (Date.now() > deadline) throw new Error(`${provider.name}: no complete trace holding ${txHash} after ${STATUS_TIMEOUT_MS / 1000}s`);
+    await new Promise((resolve) => setTimeout(resolve, STATUS_POLL_MS));
+  }
+}
+
 async function emulateRecorded(name: string, description: string, boc: string): Promise<TonEmulationResult> {
   recorder.take();
   const result = await chain.emulate(boc);
@@ -217,7 +241,8 @@ describe('TON mainnet (live)', () => {
       `fee payer ${feePayer.addressUserFriendly({ bounceable: false })} (m/44'/607'/${env.feePayerAccount}'): ` +
         `${state.status}, ${Number(state.balance) / 1e9} TON`,
     );
-    if (state.balance < ATTACHED * 2n + env.maxSpend) {
+    // Only a run that sends needs the fee payer funded.
+    if (env.send && state.balance < ATTACHED * 2n + env.maxSpend) {
       throw new Error(`Fund the fee payer ${feePayer.addressUserFriendly({ bounceable: false })} with at least 0.5 TON`);
     }
   });
@@ -348,6 +373,13 @@ describe('TON mainnet (live)', () => {
     expect((await chain.getAccountState(vault.address)).status).toBe('active');
     expect(await chain.getSeqno(vault.address)).toBe(1);
     expect(status.fees).toBeLessThan(env.maxSpend);
+    // Read back as clydner will, from the vault's transaction: the fee payer sent ATTACHED and got the rest back.
+    const vaultTx = status.trace?.transactions.find((tx) => tx.account === vault.address);
+    const vaultSide = await chain.getAccountTransfers({ account: vault.address, txHash: vaultTx?.hash as string });
+    expect(vaultSide?.settled).toBe(true);
+    expect(vaultSide?.transfers.map(({ direction, amount, final }) => ({ direction, amount, final }))[0]).toEqual({ direction: 'RECEIVE', amount: ATTACHED, final: true });
+    const feePayerSide = await chain.getAccountTransfers({ account: feePayer.address, txHash: vaultTx?.hash as string });
+    expect(feePayerSide?.transfers.map(({ direction }) => direction)).toEqual(['SEND', 'RECEIVE']);
     // The emulation priced it: within a fifth of what it cost.
     const paid = status.fees as bigint;
     const gap = paid > emulated.fees ? paid - emulated.fees : emulated.fees - paid;
@@ -450,6 +482,11 @@ describe('TON mainnet (live)', () => {
     console.log(`sent ${hash}`);
     const status = await finalStatusRecorded('relay_without_deploy_sent', 'a relay without deploy, sent; bounced back to the fee payer', hash);
     expect(status.status).toBe(TransactionStatusTypes.Failed);
+    // The vault does not exist, yet had a transaction (the bounce): both providers give its lt, not 0.
+    const bouncedVault = status.trace?.transactions.find((tx) => tx.parent !== null && tx.account !== feePayer.address);
+    const lts = await Promise.all(providers.map((p) => p.getLastTransactionLt(bouncedVault?.account as string)));
+    expect(lts[0]).toBeGreaterThan(0n);
+    expect(lts[1]).toBe(lts[0]);
     // The undeployed vault's compute phase was skipped, so TON sent the value back.
     expect(status.summary?.deliveries.map((d) => d.outcome)).toEqual(['bounced']);
   });
@@ -473,6 +510,53 @@ describe('TON mainnet (live)', () => {
     expect(() => walletAt(env.feePayerAccount + 1, version).createInternalRequest({ seqno: 0, messages: [{ to: feePayer.address, value: 1n }] })).toThrow(/W5/);
   });
 
+  // Reading an account's transfers from a transaction, as clydner does from a TonAPI webhook.
+  it('finds a trace from a transaction in its middle, alike on both providers, and lists transactions after a cursor', async () => {
+    const lastLt = await chain.getLastTransactionLt(feePayer.address);
+    expect(lastLt).toBeGreaterThan(0n);
+    const [fromToncenter, fromTonapi] = await Promise.all(
+      providers.map((p) => p.getAccountTransactions(feePayer.address, { afterLt: lastLt - 1_000_000_000n, limit: 5 })),
+    );
+    expect(fromToncenter.length).toBeGreaterThan(0);
+    expect(fromTonapi.map(({ hash, lt }) => ({ hash, lt }))).toEqual(fromToncenter.map(({ hash, lt }) => ({ hash, lt })));
+    expect([...fromToncenter.map((tx) => tx.lt)].sort((a, b) => (a < b ? -1 : 1))).toEqual(fromToncenter.map((tx) => tx.lt));
+    // A never-used address, on both providers.
+    const unused = `0:${randomBytes(32).toString('hex')}`;
+    for (const provider of providers) await expect(provider.getLastTransactionLt(unused)).resolves.toBe(0n);
+
+    // A transaction in the middle of a trace gives the whole trace, from its root, on both providers.
+    const middle = fromToncenter[fromToncenter.length - 1].hash;
+    const traces = await Promise.all(providers.map((p) => retryingOutages(() => completeTraceBy(p, middle))));
+    expect(traces[0].transactions.map((tx) => tx.hash)).toContain(middle);
+    expect(comparable(traces[1])).toEqual(comparable(traces[0]));
+  });
+
+  it("reads a recent USDT transfer's sides as a verified jetton SEND and RECEIVE, alike on both providers", async () => {
+    const reply = (await (
+      await fetch(`${TON_CENTER_MAINNET_URL}/api/v3/jetton/transfers?jetton_master=${USDT_MASTER}&limit=20&sort=desc`, {
+        headers: { 'X-API-Key': process.env.TONCENTER_API_KEY ?? '' },
+      })
+    ).json()) as { jetton_transfers: Array<{ transaction_hash: string; transaction_aborted: boolean; amount: string }> };
+    const recent = reply.jetton_transfers.find((t) => !t.transaction_aborted);
+    if (recent === undefined) throw new Error('no recent USDT transfer');
+    const txHash = Buffer.from(recent.transaction_hash, 'base64').toString('hex');
+    const trace = await completeTraceBy(toncenter, txHash);
+    const [jetton] = (await chain.getJettonTransfers(trace)).filter((t) => t.amount === BigInt(recent.amount));
+    expect(jetton).toMatchObject({ jettonMaster: USDT_MASTER });
+    const sent = await chain.accountTransfersOf(jetton.from, trace);
+    const received = await chain.accountTransfersOf(jetton.to, trace);
+    const usdt = (t: { asset: { kind: string } }) => t.asset.kind === 'jetton';
+    expect(sent.transfers.filter(usdt).some((t) => t.direction === 'SEND' && t.amount === jetton.amount && t.to === jetton.to && t.final)).toBe(true);
+    expect(received.transfers.filter(usdt).some((t) => t.direction === 'RECEIVE' && t.amount === jetton.amount && t.from === jetton.from && t.final)).toBe(true);
+    console.log(`USDT transfer ${txHash}: ${Number(jetton.amount) / 1e6} USDT from ${jetton.from} to ${jetton.to}`);
+    // The same through TonAPI alone.
+    const onTonapi = new TonChain({ chainId: CHAIN_ID_TON_MAINNET, name: 'TON', explorerUrl: 'https://tonviewer.com', toncenter: { url: TON_CENTER_MAINNET_URL }, provider: tonapi });
+    const fromTonapi = await retryingOutages(async () => onTonapi.accountTransfersOf(jetton.to, await completeTraceBy(tonapi, txHash)));
+    expect(fromTonapi.transfers.filter(usdt).map(({ direction, amount, from }) => ({ direction, amount, from }))).toEqual(
+      received.transfers.filter(usdt).map(({ direction, amount, from }) => ({ direction, amount, from })),
+    );
+  });
+
   // The masterchain prices gas, messages and cells about 150 times higher, so it is emulated only.
   it.each(['v5r1', 'v4r2', 'v3r2'] as const)("emulates funding a %s wallet on workchain -1", async (version) => {
     const wallet = TonWallet.fromMnemonic(env.mnemonic, { derivationPath: TonWallet.derivationPath({ account: env.feePayerAccount + 1 }), version, workchain: -1 });
@@ -481,7 +565,7 @@ describe('TON mainnet (live)', () => {
       await chain.createTransferUnsignedTransaction({ from: feePayer.address, to: wallet.addressUserFriendly({ bounceable: false }), amount: ATTACHED }),
       chain,
     );
-    const emulated = await chain.emulate(funding.boc);
+    const emulated = await retryingOutages(() => chain.emulate(funding.boc));
     expect(emulated.success).toBe(true);
     expect(emulated.deliveries).toEqual([expect.objectContaining({ to: wallet.address, outcome: 'delivered' })]);
     console.log(`funding a ${version} masterchain wallet: fees ${Number(emulated.fees) / 1e9} TON`);

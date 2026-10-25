@@ -133,6 +133,28 @@ Every read comes from one provider (if one fails on TON Center, all are repeated
 - `getBalance(owner, jettonMaster?)` and `getJettonWalletAddress(jettonMaster, owner)` — through the master's `get_wallet_address` and the wallet's `get_wallet_data`. A jetton wallet reads 0 only when it has no code — TON Center's exit code -13, or TonAPI's 404 confirmed by a `nonexist` / `uninit` account state; a get-method that fails on a deployed jetton wallet throws (retryably) rather than reading 0.
 - `getChainTipHeight()` — the masterchain's latest block (`provider.getMasterchainHead()` also gives its time).
 
+## An account's transfers (deposit watching)
+
+A watcher told about an account transaction — a TonAPI webhook names `account_id`, `lt`, `tx_hash` — reads what moved with:
+
+```ts
+const result = await ton.getAccountTransfers({ account, txHash }); // null while the providers have no trace yet
+for (const t of result?.transfers ?? []) {
+  if (!t.final) continue;            // emit only final transfers; read again later for the rest
+  t.direction;                       // 'RECEIVE' | 'SEND'
+  t.asset;                           // { kind: 'native' } | { kind: 'jetton', jettonMaster }
+  t.from; t.to; t.amount; t.comment; // owners (raw), smallest unit, text comment
+  t.transaction.hash; t.index;       // the transaction that moved it, and its place in it: a dedup key
+}
+result?.settled;                     // the trace is complete and all final: nothing will change
+```
+
+- **Native TON:** an incoming internal message the account kept (not one its transaction sent back as a bounce), or an outgoing one. A bounce of the account's own message coming back is a receipt marked `bounced`; the bounce it sends back is no transfer. The TON riding along a jetton transfer (`transfer`, `internal_transfer`, `transfer_notification`, `excesses`) is part of the jetton transfer, not a payment.
+- **Jettons:** the account as owner. A transfer counts only when its master vouches for both jetton wallets (`getJettonTransfers`); its transaction is the receiving jetton wallet's, so a jetton receipt is final when the jettons have landed. A jetton transfer with no forward TON amount produces no transaction on the recipient's own account, only on its jetton wallet — a watcher that must see every jetton receipt watches the owner's jetton wallets too.
+- **Final** means the moving transaction is in a finalized masterchain block; TON needs no confirmation count.
+- **Catching up** after missed notifications: `getLastTransactionLt(account)` when watching starts, then `getAccountTransactions(account, { afterLt, limit })` and `getAccountTransfers` for each. `getTraceByTransaction(txHash)` returns the whole trace holding any transaction.
+- TonAPI's free tier (1 RPS) is tight for reading traces: each shard block's masterchain block is one more request. Read through TON Center first, as `TonMainnet` does.
+
 ## Emulation, broadcast and status
 
 - `emulate(boc)` emulates the external message's whole trace with the signature ignored, deploys and downstream hops included. It returns `success` and `problem` (judged as for the status below), `deliveries`, `fees` (every transaction's fees plus the forward fees its messages carried), the failed transactions and bounced messages, native TON balance changes and `jettonCredits`. A message the target would refuse outright throws `SimulationFailed`.

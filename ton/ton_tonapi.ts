@@ -162,14 +162,22 @@ export class TonapiProvider implements TonProvider {
     return parsed.map((tx, index) => ({ hash: tx.hash, lt: asBigInt(raw[index].lt, 'lt'), utime: tx.utime, mcSeqno: tx.mcSeqno }));
   }
 
-  /** TonAPI's raw account carries the last lt; a never-used one is 404, confirmed by its account state. */
+  /**
+   * TonAPI's raw account carries the last lt. It answers 404 for an account
+   * that does not exist — including one that had transactions (a message it
+   * bounced, a balance it lost) — so then the newest transaction decides, and
+   * 0 needs no transaction and the account stated `nonexist`.
+   */
   async getLastTransactionLt(account: string): Promise<bigint> {
-    const reply = await this.get(`/v2/blockchain/accounts/${encodeURIComponent(tonRawAddress(account))}`);
-    if (reply === null) {
-      if ((await this.getAccountState(account)).status === 'nonexist') return 0n;
-      throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} returned no account for ${account}`, true);
-    }
-    return asBigInt(asRecord(reply, 'account').last_transaction_lt, 'last_transaction_lt');
+    const raw = encodeURIComponent(tonRawAddress(account));
+    const reply = await this.get(`/v2/blockchain/accounts/${raw}`);
+    if (reply !== null) return asBigInt(asRecord(reply, 'account').last_transaction_lt, 'last_transaction_lt');
+    const newest = await this.get(`/v2/blockchain/accounts/${raw}/transactions?limit=1&sort_order=desc`);
+    const list = newest === null ? [] : asRecord(newest, 'transactions').transactions;
+    if (!Array.isArray(list)) throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} returned no transaction list for ${account}`, true);
+    if (list.length > 0) return asBigInt(asRequiredRecord(list[0], 'transaction').lt, 'lt');
+    if ((await this.getAccountState(account)).status === 'nonexist') return 0n;
+    throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} returned no account for ${account}`, true);
   }
 
   /** The trace at a hash, checked; `null` on 404 and for TonAPI's emulation of a message in flight. */
