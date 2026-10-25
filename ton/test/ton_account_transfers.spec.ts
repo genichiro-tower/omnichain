@@ -244,9 +244,32 @@ describe('account transfers', () => {
     // The sender's `transfer` message and the excesses coming back are part of the jetton transfer.
     expect(jettonOf((await chain.getAccountTransfers({ account: sender, txHash: 'ab'.repeat(32) })) as TonAccountTransfers)).toEqual([{ direction: 'SEND', ...expected }]);
 
-    // A jetton wallet the master does not vouch for moves nothing.
+    // A jetton wallet the master does not vouch for moves no jettons; the TON its messages carry is plain TON.
     const impostor = chainWith(fakeProvider({ getTraceByTransaction: async () => trace, getJettonWalletData: async () => ({ balance: 0n, owner: sender, jettonMaster: USDT_MASTER }) }));
-    expect((await impostor.getAccountTransfers({ account: RECIPIENT, txHash: 'ab'.repeat(32) }))?.transfers).toEqual([]);
+    const native = (t: TonAccountTransfers | null) => t?.transfers.map(({ direction, asset, from, amount }) => ({ direction, kind: asset.kind, from, amount }));
+    expect(native(await impostor.getAccountTransfers({ account: RECIPIENT, txHash: 'ab'.repeat(32) }))).toEqual([
+      { direction: 'RECEIVE', kind: 'native', from: RECIPIENT_JW, amount: 1n },
+    ]);
+    expect(native(await impostor.getAccountTransfers({ account: sender, txHash: 'ab'.repeat(32) }))).toEqual([
+      { direction: 'SEND', kind: 'native', from: sender, amount: 50_000_000n },
+      { direction: 'RECEIVE', kind: 'native', from: RECIPIENT_JW, amount: 30_000_000n },
+    ]);
+  });
+
+  it('reports TON sent with a jetton opcode to a contract that is no jetton wallet, as TON', async () => {
+    const [root, child] = (await realTrace()).transactions;
+    // 500 TON with a body that only looks like a jetton `transfer`: no jetton wallet takes it.
+    const lookalike: TonTraceMessage = {
+      ...root.outMsgs[0],
+      value: 500_000_000_000n,
+      opcode: 0x0f8a7ea5,
+      body: tonJettonTransferBody({ amount: 1n, destination: OTHER, responseDestination: root.account }),
+    };
+    const trace: TonTrace = { complete: true, transactions: settled([{ ...root, outMsgs: [lookalike] }, { ...child, inMsg: lookalike }]) };
+    const result = (await chainWith(fakeProvider({ getTraceByTransaction: async () => trace })).getAccountTransfers({ account: root.account, txHash: 'ab'.repeat(32) })) as TonAccountTransfers;
+    expect(result.transfers.map(({ direction, asset, to, amount }) => ({ direction, asset, to, amount }))).toEqual([
+      { direction: 'SEND', asset: { kind: 'native' }, to: child.account, amount: 500_000_000_000n },
+    ]);
   });
 
   it('does not count a message its receiver sent back, and marks the bounce coming back', async () => {
