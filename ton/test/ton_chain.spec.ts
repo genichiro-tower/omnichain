@@ -24,6 +24,9 @@ function fakeProvider(overrides: Partial<TonProvider> = {}): TonProvider {
     getMasterchainHead: async () => ({ seqno: 100, utime: 1_700_000_000 }),
     getJettonContent: async () => usdtJettonContent(),
     getJettonWalletData: async () => null,
+    getTraceByTransaction: async () => null,
+    getAccountTransactions: async () => [],
+    getLastTransactionLt: async () => 0n,
     ...overrides,
   };
 }
