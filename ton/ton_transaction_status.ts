@@ -93,6 +93,18 @@ export interface TonTraceSummary {
   jettonCredits: TonJettonCredit[];
 }
 
+/**
+ * Jettons the trace's jetton wallets accepted (\`internal_transfer\` not
+ * aborted), as the trace shows them — not yet checked against any master.
+ */
+export function tonJettonCreditsOf(trace: TonTrace): TonJettonCredit[] {
+  return trace.transactions.flatMap((tx) => {
+    // Accepted unless the jetton wallet's transaction aborted; a refund it then skipped does not undo the credit.
+    const credit = !tx.aborted && tx.inMsg !== null ? jettonCreditOf(tx, tx.inMsg) : null;
+    return credit === null ? [] : [credit];
+  });
+}
+
 export function summarizeTonTrace(chainId: number, trace: TonTrace): TonTraceSummary {
   assertTraceConsistent('the trace given', trace);
   const native = new TonAsset(chainId, 'TON', null, TonAsset.NATIVE_DECIMALS);
@@ -101,7 +113,6 @@ export function summarizeTonTrace(chainId: number, trace: TonTrace): TonTraceSum
     deltas.set(account, (deltas.get(account) ?? 0n) + delta);
   };
   let fees = 0n;
-  const jettonCredits: TonJettonCredit[] = [];
   for (const tx of trace.transactions) {
     fees += tx.totalFees;
     let debit = tx.totalFees;
@@ -112,9 +123,6 @@ export function summarizeTonTrace(chainId: number, trace: TonTrace): TonTraceSum
       debit += out.value + out.fwdFee;
     }
     add(tx.account, -debit);
-    // Accepted unless the jetton wallet's transaction aborted; a refund it then skipped does not undo the credit.
-    const credit = !tx.aborted && tx.inMsg !== null ? jettonCreditOf(tx, tx.inMsg) : null;
-    if (credit !== null) jettonCredits.push(credit);
   }
 
   const balanceChanges: NestedBalanceChanges = new Map();
@@ -133,7 +141,7 @@ export function summarizeTonTrace(chainId: number, trace: TonTrace): TonTraceSum
     failedTransactions: trace.transactions.filter((tx) => !tx.success),
     bouncedMessages: trace.transactions.flatMap((tx) => (tx.inMsg !== null && tx.inMsg.bounced ? [tx.inMsg] : [])),
     balanceChanges,
-    jettonCredits,
+    jettonCredits: tonJettonCreditsOf(trace),
   };
 }
 

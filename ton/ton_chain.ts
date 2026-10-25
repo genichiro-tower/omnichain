@@ -22,6 +22,7 @@ import {
   TonSignedMessage,
   tonCommentBody,
   tonJettonTransferBody,
+  tonJettonTransferCommentOf,
   tonMessageHash,
   tonWalletRequestFields,
 } from './ton_messages.ts';
@@ -35,11 +36,13 @@ import {
   TonProviderError,
   type TonTrace,
   type TonTraceMessage,
+  type TonTraceTransaction,
+  type TonAccountTransaction,
   assertTonTxHash,
 } from './ton_provider.ts';
 import { ToncenterProvider } from './ton_toncenter.ts';
 import { TonapiProvider } from './ton_tonapi.ts';
-import { type TonJettonCredit, type TonTraceSummary, TonTransactionStatus, summarizeTonTrace } from './ton_transaction_status.ts';
+import { type TonTraceSummary, TonTransactionStatus, summarizeTonTrace, tonJettonCreditsOf } from './ton_transaction_status.ts';
 import { TonSignedTransaction, TonUnsignedTransaction, tonExternalBocHash } from './ton_transactions.ts';
 
 /** TON a jetton transfer carries to the sender's jetton wallet; the excess returns to `responseDestination`. */
@@ -58,6 +61,24 @@ function strictHex(value: string, bytes: number, what: string): Buffer {
     throw new ChainError(ChainErrorKinds.InvalidArgument, `A TON ${what} is ${bytes * 2} hex characters`);
   }
   return Buffer.from(value, 'hex');
+}
+
+/** A wallet-to-wallet jetton transfer a trace completed, its master vouching for both jetton wallets. */
+export interface TonJettonTransfer {
+  /** Raw. */
+  jettonMaster: string;
+  /** The sending owner, raw. */
+  from: string;
+  /** The receiving owner, raw. */
+  to: string;
+  /** In the jetton's smallest unit. */
+  amount: bigint;
+  senderJettonWallet: string;
+  recipientJettonWallet: string;
+  /** The receiving jetton wallet's transaction, which moved the jettons. */
+  transaction: TonTraceTransaction;
+  /** The text comment the transfer forwards to the recipient, if any. */
+  comment: string | null;
 }
 
 /** Where a signed request stands; see `TonChain.getRequestState`. */
@@ -340,7 +361,7 @@ export class TonChain extends Chain {
   async emulate(boc: string): Promise<TonEmulationResult> {
     const trace = await this.provider.emulate(boc);
     const summary = summarizeTonTrace(this.chainId, trace);
-    await this.addJettonBalanceChanges(trace, summary.jettonCredits, summary.balanceChanges);
+    await this.addJettonBalanceChanges(trace, summary.balanceChanges);
     return { trace, ...summary };
   }
 
@@ -391,6 +412,22 @@ export class TonChain extends Chain {
   }
 
   /** The masterchain's latest block. */
+  /** The whole trace holding the account transaction `txHash`, from its root; `null` while the providers have not seen it. */
+  getTraceByTransaction(txHash: string): Promise<TonTrace | null> {
+    this.assertTxHash(txHash);
+    return this.provider.getTraceByTransaction(txHash);
+  }
+
+  /** The account's transactions with an lt above `afterLt` (0 for all), oldest first, at most `limit` (1 to 100, default 100). */
+  getAccountTransactions(account: string, opts: { afterLt?: bigint; limit?: number } = {}): Promise<TonAccountTransaction[]> {
+    return this.provider.getAccountTransactions(tonRawAddress(account), { afterLt: opts.afterLt ?? 0n, limit: opts.limit ?? 100 });
+  }
+
+  /** The lt of the account's last transaction; 0 for an account that never had one. */
+  getLastTransactionLt(account: string): Promise<bigint> {
+    return this.provider.getLastTransactionLt(tonRawAddress(account));
+  }
+
   async getChainTipHeight(): Promise<number> {
     return (await this.provider.getMasterchainHead()).seqno;
   }
@@ -515,23 +552,20 @@ export class TonChain extends Chain {
       masterchainTip,
       minMasterchainDepth: opts.minMasterchainDepth,
     });
-    if (trace !== null && status.balanceChanges !== null) await this.addJettonBalanceChanges(trace, status.jettonCredits, status.balanceChanges);
+    if (trace !== null && status.balanceChanges !== null) await this.addJettonBalanceChanges(trace, status.balanceChanges);
     return status;
   }
 
   /**
-   * Adds the jetton balance changes of the trace's wallet-to-wallet jetton
-   * transfers (TEP-74 \`transfer\` → \`internal_transfer\`) to
-   * \`balanceChanges\`: the sending owner loses the amount and the recipient
-   * gains it, in the jetton's asset ({@link resolveAsset}).
-   *
-   * A transfer counts only once its master vouches for both jetton wallets:
+   * The wallet-to-wallet jetton transfers (TEP-74 \`transfer\` →
+   * \`internal_transfer\`) the trace completed: a jetton wallet accepted the
+   * jettons. Each counts only once its master vouches for both jetton wallets:
    * the sender's must be the master's wallet for the owner it reports, and
    * the receiving one the master's wallet for the recipient the transfer
    * named. Anything else — a contract posing as a jetton wallet, a mint or a
-   * burn — moves no balance here.
+   * burn — is not a transfer here.
    */
-  private async addJettonBalanceChanges(trace: TonTrace, credits: readonly TonJettonCredit[], balanceChanges: NestedBalanceChanges): Promise<void> {
+  async getJettonTransfers(trace: TonTrace): Promise<TonJettonTransfer[]> {
     const byHash = new Map(trace.transactions.map((tx) => [tx.hash, tx]));
     const walletData = new Map<string, Promise<TonJettonWalletData | null>>();
     const walletOf = new Map<string, Promise<string>>();
@@ -544,11 +578,12 @@ export class TonChain extends Chain {
       if (!walletOf.has(key)) walletOf.set(key, this.provider.getJettonWalletAddress(master, owner));
       return walletOf.get(key) as Promise<string>;
     };
-    for (const credit of credits) {
+    const transfers: TonJettonTransfer[] = [];
+    for (const credit of tonJettonCreditsOf(trace)) {
       const received = byHash.get(credit.transaction);
       const sender = received?.parent === null || received?.parent === undefined ? undefined : byHash.get(received.parent);
       const recipient = sender?.inMsg === null || sender?.inMsg === undefined ? null : jettonTransferDestinationOf(sender.inMsg);
-      if (credit.senderJettonWallet === null || sender === undefined || recipient === null) continue;
+      if (credit.senderJettonWallet === null || sender === undefined || recipient === null || received === undefined) continue;
       const data = await dataOf(credit.senderJettonWallet);
       if (data === null) continue;
       const [senderWallet, recipientWallet] = await Promise.all([
@@ -556,9 +591,26 @@ export class TonChain extends Chain {
         walletAddressOf(data.jettonMaster, recipient),
       ]);
       if (senderWallet !== credit.senderJettonWallet || recipientWallet !== credit.jettonWallet) continue;
-      const asset = await this.resolveAsset(data.jettonMaster);
-      AssetBalanceChange.upsert(balanceChanges, data.owner, asset, AssetBalanceChange.fromMr(-credit.amount, asset.decimals));
-      AssetBalanceChange.upsert(balanceChanges, recipient, asset, AssetBalanceChange.fromMr(credit.amount, asset.decimals));
+      transfers.push({
+        jettonMaster: data.jettonMaster,
+        from: data.owner,
+        to: recipient,
+        amount: credit.amount,
+        senderJettonWallet: credit.senderJettonWallet,
+        recipientJettonWallet: credit.jettonWallet,
+        transaction: received,
+        comment: tonJettonTransferCommentOf(sender.inMsg?.body ?? null),
+      });
+    }
+    return transfers;
+  }
+
+  /** Adds the verified jetton transfers' balance changes: the sending owner loses the amount, the recipient gains it. */
+  private async addJettonBalanceChanges(trace: TonTrace, balanceChanges: NestedBalanceChanges): Promise<void> {
+    for (const transfer of await this.getJettonTransfers(trace)) {
+      const asset = await this.resolveAsset(transfer.jettonMaster);
+      AssetBalanceChange.upsert(balanceChanges, transfer.from, asset, AssetBalanceChange.fromMr(-transfer.amount, asset.decimals));
+      AssetBalanceChange.upsert(balanceChanges, transfer.to, asset, AssetBalanceChange.fromMr(transfer.amount, asset.decimals));
     }
   }
 }
