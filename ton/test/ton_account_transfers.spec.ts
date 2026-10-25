@@ -134,7 +134,7 @@ describe('last transaction lt', () => {
     await expect(new ToncenterProvider(ENDPOINT).getLastTransactionLt(FEE_PAYER)).resolves.toBe(111648649000011n);
     stubFetch(() => ({ status: 200, body: { accounts: [] } }));
     await expect(new ToncenterProvider(ENDPOINT).getLastTransactionLt(NEVER_USED)).resolves.toBe(0n);
-    stubFetch(() => ({ status: 200, body: { last_transaction_lt: '111648649000011', status: 'active', balance: '1' } }));
+    stubFetch((url) => (url.includes('/transactions') ? { status: 200, body: { transactions: [{ lt: 111648649000011 }] } } : { status: 200, body: { status: 'active', balance: 1 } }));
     await expect(new TonapiProvider(ENDPOINT).getLastTransactionLt(FEE_PAYER)).resolves.toBe(111648649000011n);
     stubFetch((url) => {
       if (url.includes('/transactions')) return { status: 200, body: { transactions: [] } };
@@ -142,13 +142,13 @@ describe('last transaction lt', () => {
       return { status: 200, body: { balance: 0, status: 'nonexist' } };
     });
     await expect(new TonapiProvider(ENDPOINT).getLastTransactionLt(NEVER_USED)).resolves.toBe(0n);
-    // An account that does not exist but had transactions (e.g. it bounced a message): its newest one.
+    // An account that does not exist but bounced a message: TonAPI's raw account states lt 0 (as on mainnet), its list has the transaction.
     stubFetch((url) => {
-      if (url.includes('/transactions')) return { status: 200, body: { transactions: [{ lt: 112315993000019 }] } };
-      if (url.includes('/v2/blockchain/accounts/')) return { status: 404, body: { error: 'entity not found' } };
+      if (url.includes('/transactions')) return { status: 200, body: { transactions: [{ lt: 112322303000014 }] } };
+      if (url.includes('/v2/blockchain/accounts/')) return { status: 200, body: { balance: 0, last_transaction_lt: 0, status: 'nonexist' } };
       return { status: 200, body: { balance: 0, status: 'nonexist' } };
     });
-    await expect(new TonapiProvider(ENDPOINT).getLastTransactionLt(NEVER_USED)).resolves.toBe(112315993000019n);
+    await expect(new TonapiProvider(ENDPOINT).getLastTransactionLt(NEVER_USED)).resolves.toBe(112322303000014n);
     stubFetch(() => ({ status: 200, body: { address_book: {} } }));
     await expect(new ToncenterProvider(ENDPOINT).getLastTransactionLt(FEE_PAYER)).rejects.toMatchObject({ retryable: true });
   });

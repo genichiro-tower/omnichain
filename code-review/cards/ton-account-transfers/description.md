@@ -108,14 +108,17 @@ notifications.
 
 # Deviations
 
-- `getLastTransactionLt` on TonAPI: its raw account is 404 for an account that
-  does not exist even when it had transactions (a bounced message), so the
-  newest transaction decides there; 0 needs none and `nonexist` stated.
-- The live AC4 checks (the relay read back, the bounced vault's lt alike on
-  both providers) are written but not run: the fee payer holds 0.1885 TON,
-  under the 0.2 a sending run requires. Unit tests on recorded mainnet
-  replies cover both. The live suite now asks for funds only when it sends,
-  and retries provider outages in its TonAPI cross-checks.
+- `getLastTransactionLt` on TonAPI: its raw account states
+  `last_transaction_lt: 0` for an account that does not exist but had
+  transactions (a vault that bounced a relay — seen on mainnet, while TON
+  Center gave the lt), so the newest transaction in its list decides; 0 needs
+  an empty list and `nonexist` stated.
+- Live, with sends (2026-10-25): 28 of 29, then the remaining emulation test
+  passed on its own (it had raced the previous run's last transaction). The
+  relay read back with `getAccountTransfers`, and the bounced vault's last lt
+  alike on both providers. The live suite asks for funds only when it sends
+  (`TON_LIVE_SKIP_BALANCE_CHECK=1` bypasses that), and retries provider
+  outages in its TonAPI cross-checks.
 - TonAPI's free tier (1 RPS) rate-limits trace reads (one masterchain-block
   lookup per shard block); reads should go through TON Center first.
 

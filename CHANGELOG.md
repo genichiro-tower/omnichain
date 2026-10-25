@@ -18,7 +18,7 @@ TON: an account's transfers from a transaction hash, with finality — what a de
 - **`TonChain.getJettonTransfers(trace)`**: the verified wallet-to-wallet jetton transfers of a trace (the jetton balance changes now build on it).
 - **`getTraceByTransaction(txHash)`** (providers and `TonChain`): the whole trace holding an account transaction, from its root; refused unless it holds it.
 - **`getAccountTransactions(account, { afterLt, limit })`**: transactions after a cursor, oldest first, alike on both providers (TON Center's inclusive `start_lt`, TonAPI's exclusive `after_lt`).
-- **`getLastTransactionLt(account)`**: 0 only for an account that never had a transaction — one that does not exist but bounced a message still has its lt.
+- **`getLastTransactionLt(account)`**: 0 only for an account that never had a transaction — one that does not exist but bounced a message still has its lt. On TonAPI it is read from the transaction list: its raw account states 0 for such an account.
 - `TonTraceTransaction.lt`; `tonJettonCreditsOf`, `tonTextCommentOf`, `tonJettonTransferCommentOf`; the jetton notification and excesses ops.
 
 ## [0.7.0] — 2026-10-21

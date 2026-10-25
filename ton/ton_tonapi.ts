@@ -163,15 +163,14 @@ export class TonapiProvider implements TonProvider {
   }
 
   /**
-   * TonAPI's raw account carries the last lt. It answers 404 for an account
-   * that does not exist — including one that had transactions (a message it
-   * bounced, a balance it lost) — so then the newest transaction decides, and
-   * 0 needs no transaction and the account stated `nonexist`.
+   * The newest transaction's lt. TonAPI's raw account is no source for it: for
+   * an account that does not exist but had transactions (one that bounced a
+   * message), it states `last_transaction_lt: 0` (seen on mainnet) while its
+   * transaction list holds them. 0 needs an empty list and the account stated
+   * `nonexist`.
    */
   async getLastTransactionLt(account: string): Promise<bigint> {
     const raw = encodeURIComponent(tonRawAddress(account));
-    const reply = await this.get(`/v2/blockchain/accounts/${raw}`);
-    if (reply !== null) return asBigInt(asRecord(reply, 'account').last_transaction_lt, 'last_transaction_lt');
     const newest = await this.get(`/v2/blockchain/accounts/${raw}/transactions?limit=1&sort_order=desc`);
     const list = newest === null ? [] : asRecord(newest, 'transactions').transactions;
     if (!Array.isArray(list)) throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} returned no transaction list for ${account}`, true);

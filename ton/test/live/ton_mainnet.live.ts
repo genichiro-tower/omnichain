@@ -63,6 +63,7 @@ const env = {
   maxSpend: BigInt(process.env.TON_LIVE_MAX_SPEND_NANO ?? String(NANO / 10n)),
   send: process.env.TON_LIVE_SEND === '1',
   record: process.env.TON_LIVE_RECORD === '1',
+  skipBalanceCheck: process.env.TON_LIVE_SKIP_BALANCE_CHECK === '1',
 };
 
 const missing = [
@@ -241,8 +242,8 @@ describe('TON mainnet (live)', () => {
       `fee payer ${feePayer.addressUserFriendly({ bounceable: false })} (m/44'/607'/${env.feePayerAccount}'): ` +
         `${state.status}, ${Number(state.balance) / 1e9} TON`,
     );
-    // Only a run that sends needs the fee payer funded.
-    if (env.send && state.balance < ATTACHED * 2n + env.maxSpend) {
+    // Only a run that sends needs the fee payer funded; TON_LIVE_SKIP_BALANCE_CHECK=1 runs on what it has.
+    if (env.send && !env.skipBalanceCheck && state.balance < ATTACHED * 2n + env.maxSpend) {
       throw new Error(`Fund the fee payer ${feePayer.addressUserFriendly({ bounceable: false })} with at least 0.5 TON`);
     }
   });
@@ -484,9 +485,17 @@ describe('TON mainnet (live)', () => {
     expect(status.status).toBe(TransactionStatusTypes.Failed);
     // The vault does not exist, yet had a transaction (the bounce): both providers give its lt, not 0.
     const bouncedVault = status.trace?.transactions.find((tx) => tx.parent !== null && tx.account !== feePayer.address);
-    const lts = await Promise.all(providers.map((p) => p.getLastTransactionLt(bouncedVault?.account as string)));
-    expect(lts[0]).toBeGreaterThan(0n);
-    expect(lts[1]).toBe(lts[0]);
+    const lt = await toncenter.getLastTransactionLt(bouncedVault?.account as string);
+    expect(lt).toBeGreaterThan(0n);
+    // TonAPI can trail TON Center by a few seconds; it must agree once it caught up.
+    const deadline = Date.now() + 90_000;
+    let fromTonapi = await retryingOutages(() => tonapi.getLastTransactionLt(bouncedVault?.account as string));
+    while (fromTonapi !== lt && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, STATUS_POLL_MS));
+      fromTonapi = await retryingOutages(() => tonapi.getLastTransactionLt(bouncedVault?.account as string));
+    }
+    console.log(`bounced vault ${bouncedVault?.account}: last lt ${lt} on TON Center, ${fromTonapi} on TonAPI`);
+    expect(fromTonapi).toBe(lt);
     // The undeployed vault's compute phase was skipped, so TON sent the value back.
     expect(status.summary?.deliveries.map((d) => d.outcome)).toEqual(['bounced']);
   });
