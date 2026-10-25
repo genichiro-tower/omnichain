@@ -305,3 +305,62 @@ describe('account transfers', () => {
     ]);
   });
 });
+
+describe('account transfers read before and after a jetton transfer completes', () => {
+  it('keeps every final transfer and its index; a jetton-shaped message is final only on a complete trace', async () => {
+    const [root] = (await realTrace()).transactions;
+    const sender = root.account;
+    const SENDER_JW = '0:' + '1a'.repeat(32);
+    const RECIPIENT_JW = '0:' + '2b'.repeat(32);
+    const lt = root.outMsgs[0].createdLt as bigint;
+    const transfer: TonTraceMessage = {
+      ...root.outMsgs[0],
+      destination: SENDER_JW,
+      value: 50_000_000n,
+      bounce: true,
+      opcode: 0x0f8a7ea5,
+      createdLt: lt,
+      body: tonJettonTransferBody({ amount: 5n, destination: OTHER, responseDestination: sender, forwardTonAmount: 0n }),
+    };
+    const payment: TonTraceMessage = { ...root.outMsgs[0], value: 1_000_000_000n, createdLt: lt + 1n, body: tonCommentBody('rent') };
+    const internalTransfer: TonTraceMessage = {
+      ...transfer,
+      source: SENDER_JW,
+      destination: RECIPIENT_JW,
+      value: 40_000_000n,
+      opcode: TON_JETTON_INTERNAL_TRANSFER_OP,
+      createdLt: lt + 3n,
+      body: beginCell().storeUint(TON_JETTON_INTERNAL_TRANSFER_OP, 32).storeUint(0, 64).storeCoins(5n).storeAddress(Address.parse(sender)).storeAddress(Address.parse(sender)).storeCoins(0n).storeBit(false).endCell(),
+    };
+    const tx = (hash: string, parent: string, account: string, inMsg: TonTraceMessage, outMsgs: TonTraceMessage[] = []): TonTraceTransaction => ({ ...root, hash: hash.repeat(32), parent, account, inMsg, outMsgs, success: true, aborted: false });
+    // Listed in the reverse of creation order, as a provider may.
+    const owner = { ...root, outMsgs: [payment, transfer] };
+    const senderJettonWallet = tx('c1', root.hash, SENDER_JW, transfer, [internalTransfer]);
+    const paid = tx('c3', root.hash, root.outMsgs[0].destination as string, payment);
+    const recipientJettonWallet = tx('c2', senderJettonWallet.hash, RECIPIENT_JW, internalTransfer);
+    const provider = (trace: TonTrace) =>
+      fakeProvider({
+        getTraceByTransaction: async () => trace,
+        getJettonWalletData: async (wallet: string) => (wallet === SENDER_JW ? { balance: 0n, owner: sender, jettonMaster: USDT_MASTER } : null),
+        getJettonWalletAddress: async (_master: string, who: string) => (who === sender ? SENDER_JW : who === OTHER ? RECIPIENT_JW : JETTON_WALLET),
+      });
+    const view = (t: TonAccountTransfers) =>
+      t.transfers.map(({ direction, asset, amount, index, final, transaction }) => ({ direction, kind: asset.kind, amount, index, final, tx: transaction.hash }));
+
+    // Before: the receiving jetton wallet has not run yet.
+    const before = (await chainWith(provider({ complete: false, transactions: [owner, senderJettonWallet, paid] })).getAccountTransfers({ account: sender, txHash: 'ab'.repeat(32) })) as TonAccountTransfers;
+    expect(view(before)).toEqual([
+      { direction: 'SEND', kind: 'native', amount: 50_000_000n, index: 0, final: false, tx: root.hash },
+      { direction: 'SEND', kind: 'native', amount: 1_000_000_000n, index: 1, final: true, tx: root.hash },
+    ]);
+    // After: the jettons landed; the transfer message is the jetton transfer's, and the payment keeps its index.
+    const after = (await chainWith(provider({ complete: true, transactions: [owner, senderJettonWallet, paid, recipientJettonWallet] })).getAccountTransfers({ account: sender, txHash: 'ab'.repeat(32) })) as TonAccountTransfers;
+    expect(view(after)).toEqual([
+      { direction: 'SEND', kind: 'native', amount: 1_000_000_000n, index: 1, final: true, tx: root.hash },
+      { direction: 'SEND', kind: 'jetton', amount: 5n, index: 0, final: true, tx: recipientJettonWallet.hash },
+    ]);
+    // Every transfer final before is unchanged after.
+    const finalBefore = view(before).filter((t) => t.final);
+    expect(view(after)).toEqual(expect.arrayContaining(finalBefore));
+  });
+});

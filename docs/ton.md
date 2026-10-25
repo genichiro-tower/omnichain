@@ -144,14 +144,15 @@ for (const t of result?.transfers ?? []) {
   t.direction;                       // 'RECEIVE' | 'SEND'
   t.asset;                           // { kind: 'native' } | { kind: 'jetton', jettonMaster }
   t.from; t.to; t.amount; t.comment; // owners (raw), smallest unit, text comment
-  t.transaction.hash; t.index;       // the transaction that moved it, and its place in it: a dedup key
+  t.transaction.hash; t.index;       // with t.direction, names the transfer on every read: a dedup key
 }
 result?.settled;                     // the trace is complete and all final: nothing will change
 ```
 
 - **Native TON:** an incoming internal message the account kept (not one its transaction sent back as a bounce), or an outgoing one. A bounce of the account's own message coming back is a receipt marked `bounced`; the bounce it sends back is no transfer. The TON riding along a jetton transfer (`transfer`, `internal_transfer`, `transfer_notification`, `excesses`) is part of the jetton transfer, not a payment.
 - **Jettons:** the account as owner. A transfer counts only when its master vouches for both jetton wallets (`getJettonTransfers`); its transaction is the receiving jetton wallet's, so a jetton receipt is final when the jettons have landed. A jetton transfer with no forward TON amount produces no transaction on the recipient's own account, only on its jetton wallet — a watcher that must see every jetton receipt watches the owner's jetton wallets too.
-- **Final** means the moving transaction is in a finalized masterchain block; TON needs no confirmation count.
+- **Final** means the moving transaction is in a finalized masterchain block (TON needs no confirmation count) — and, for a native transfer whose message is shaped like a jetton message, that the trace is complete, since until then it may yet turn out to be part of a jetton transfer. A final transfer never changes or disappears on a later read.
+- **Naming a transfer:** `(transaction.hash, direction, index)` is the same on every read and provider. `index` is a native SEND's position among its transaction's outgoing messages ordered by creation lt, and 0 for a receipt or a jetton transfer.
 - **Catching up** after missed notifications: `getLastTransactionLt(account)` when watching starts, then `getAccountTransactions(account, { afterLt, limit })` and `getAccountTransfers` for each. `getTraceByTransaction(txHash)` returns the whole trace holding any transaction.
 - TonAPI's free tier (1 RPS) is tight for reading traces: each shard block's masterchain block is one more request. Read through TON Center first, as `TonMainnet` does.
 

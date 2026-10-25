@@ -19,6 +19,7 @@ import { TonAsset } from './ton_asset.ts';
 import { type TonJettonMetadata, type TonMetadataFetcher, readTonJettonMetadata } from './ton_jetton_metadata.ts';
 import {
   TON_JETTON_EXCESSES_OP,
+  TON_JETTON_INTERNAL_TRANSFER_OP,
   TON_JETTON_TRANSFER_NOTIFICATION_OP,
   TON_JETTON_TRANSFER_OP,
   TonSignedMessage,
@@ -101,9 +102,19 @@ export interface TonAccountTransfer {
    * that received or sent it); for jettons the receiving jetton wallet's.
    */
   transaction: TonTraceTransaction;
-  /** Tells apart transfers moved by one transaction, in the order they were made. */
+  /**
+   * With `transaction.hash` and `direction`, names the transfer, the same on
+   * every read and provider: a native SEND's position among its transaction's
+   * outgoing messages ordered by creation lt; 0 for a receipt and for a jetton
+   * transfer (one each per transaction).
+   */
   index: number;
-  /** That transaction is in a finalized masterchain block: the transfer will not change. */
+  /**
+   * The transfer will not change: its transaction is in a finalized
+   * masterchain block — and, for a native transfer whose message is shaped
+   * like a jetton message, the trace is complete, since only then is it known
+   * whether that message was part of a jetton transfer.
+   */
   final: boolean;
   /** Native only: a bounce of a message the account had sent, coming back. */
   bounced: boolean;
@@ -119,6 +130,16 @@ export interface TonAccountTransfers {
 
 /** The messages a jetton wallet sends its owner or the response address once it took the jettons. */
 const JETTON_FOLLOW_UP_OPS: ReadonlySet<number> = new Set([TON_JETTON_TRANSFER_NOTIFICATION_OP, TON_JETTON_EXCESSES_OP]);
+
+/** Every opcode a jetton transfer's messages use: a message bearing one may turn out to be part of one. */
+const JETTON_MESSAGE_OPS: ReadonlySet<number> = new Set([
+  TON_JETTON_TRANSFER_OP,
+  TON_JETTON_INTERNAL_TRANSFER_OP,
+  TON_JETTON_TRANSFER_NOTIFICATION_OP,
+  TON_JETTON_EXCESSES_OP,
+]);
+
+const isJettonShaped = (message: TonTraceMessage): boolean => message.opcode !== null && JETTON_MESSAGE_OPS.has(message.opcode);
 
 /** Names one message: its sender and creation lt. */
 const messageKey = (source: string | null, createdLt: bigint | null): string => `${source}:${createdLt}`;
@@ -622,7 +643,7 @@ export class TonChain extends Chain {
    */
   async accountTransfersOf(account: string, trace: TonTrace): Promise<TonAccountTransfers> {
     const owner = tonRawAddress(account);
-    const found: Array<Omit<TonAccountTransfer, 'index' | 'final'>> = [];
+    const found: Array<Omit<TonAccountTransfer, 'final'> & { jettonShaped: boolean }> = [];
     const jettons = await this.getJettonTransfers(trace);
     // The TON riding along a verified jetton transfer is part of it: the owner's
     // `transfer`, the `internal_transfer`, and the notification and excesses the
@@ -657,12 +678,16 @@ export class TonChain extends Chain {
             amount: inMsg.value,
             comment: tonTextCommentOf(inMsg.body),
             transaction: tx,
+            index: 0,
             bounced: inMsg.bounced,
+            jettonShaped: isJettonShaped(inMsg),
           });
         }
       }
-      for (const message of tx.outMsgs) {
-        if (message.destination === null || message.bounced || !isNativePayment(message)) continue;
+      // Ordered by creation, so a message's position does not depend on the provider's order.
+      const outgoing = [...tx.outMsgs].sort((a, b) => ((a.createdLt ?? 0n) < (b.createdLt ?? 0n) ? -1 : (a.createdLt ?? 0n) > (b.createdLt ?? 0n) ? 1 : 0));
+      outgoing.forEach((message, position) => {
+        if (message.destination === null || message.bounced || !isNativePayment(message)) return;
         found.push({
           direction: 'SEND',
           asset: { kind: 'native' },
@@ -671,9 +696,11 @@ export class TonChain extends Chain {
           amount: message.value,
           comment: tonTextCommentOf(message.body),
           transaction: tx,
+          index: position,
           bounced: false,
+          jettonShaped: isJettonShaped(message),
         });
-      }
+      });
     }
     for (const jetton of jettons) {
       const common = {
@@ -683,17 +710,17 @@ export class TonChain extends Chain {
         amount: jetton.amount,
         comment: jetton.comment,
         transaction: jetton.transaction,
+        index: 0,
         bounced: false,
+        jettonShaped: false,
       };
       if (jetton.from === owner) found.push({ ...common, direction: 'SEND' });
       if (jetton.to === owner) found.push({ ...common, direction: 'RECEIVE' });
     }
-    const perTransaction = new Map<string, number>();
-    const transfers = found.map((transfer) => {
-      const index = perTransaction.get(transfer.transaction.hash) ?? 0;
-      perTransaction.set(transfer.transaction.hash, index + 1);
-      return { ...transfer, index, final: transfer.transaction.mcSeqno !== null };
-    });
+    const transfers = found.map(({ jettonShaped, ...transfer }) => ({
+      ...transfer,
+      final: transfer.transaction.mcSeqno !== null && (!jettonShaped || trace.complete),
+    }));
     return { trace, settled: trace.complete && trace.transactions.every((tx) => tx.mcSeqno !== null), transfers };
   }
 
