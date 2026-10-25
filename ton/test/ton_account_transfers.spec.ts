@@ -1,9 +1,22 @@
 import { readFileSync } from 'node:fs';
 
+import { Address, beginCell } from '@ton/core';
+
+import { CHAIN_ID_TON_MAINNET } from '../../chain_ids.ts';
 import { ChainErrorKinds } from '../../errors.ts';
-import type { TonTrace } from '../ton_provider.ts';
+import { tonUserFriendlyAddress } from '../ton_address.ts';
+import { type TonAccountTransfers, TonChain } from '../ton_chain.ts';
+import {
+  TON_JETTON_EXCESSES_OP,
+  TON_JETTON_INTERNAL_TRANSFER_OP,
+  TON_JETTON_TRANSFER_NOTIFICATION_OP,
+  tonCommentBody,
+  tonJettonTransferBody,
+} from '../ton_messages.ts';
+import type { TonAccountState, TonProvider, TonTrace, TonTraceMessage, TonTraceTransaction } from '../ton_provider.ts';
 import { ToncenterProvider } from '../ton_toncenter.ts';
 import { TonapiProvider } from '../ton_tonapi.ts';
+import { JETTON_WALLET, OTHER, USDT_MASTER, bouncing, realTrace, settled, usdtJettonContent } from './ton_test_helpers.ts';
 
 const ENDPOINT = { url: 'https://provider.test', apiKey: 'key' };
 const fixture = (name: string): unknown => JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8'));
@@ -127,5 +140,134 @@ describe('last transaction lt', () => {
     await expect(new TonapiProvider(ENDPOINT).getLastTransactionLt(NEVER_USED)).resolves.toBe(0n);
     stubFetch(() => ({ status: 200, body: { address_book: {} } }));
     await expect(new ToncenterProvider(ENDPOINT).getLastTransactionLt(FEE_PAYER)).rejects.toMatchObject({ retryable: true });
+  });
+});
+
+function fakeProvider(overrides: Partial<TonProvider> = {}): TonProvider {
+  return {
+    name: 'fake',
+    getAccountState: async (): Promise<TonAccountState> => ({ status: 'active', balance: 5n, codeHash: 'h' }),
+    getSeqno: async () => 3,
+    getJettonWalletAddress: async () => JETTON_WALLET,
+    getJettonBalance: async () => 0n,
+    sendBoc: async () => {},
+    getTrace: async () => null,
+    emulate: async () => ({ complete: true, transactions: [] }),
+    getMasterchainHead: async () => ({ seqno: 100520170, utime: 1_700_000_000 }),
+    getJettonContent: async () => usdtJettonContent(),
+    getJettonWalletData: async () => null,
+    getTraceByTransaction: async () => null,
+    getAccountTransactions: async () => [],
+    getLastTransactionLt: async () => 0n,
+    ...overrides,
+  };
+}
+
+const chainWith = (provider: TonProvider): TonChain =>
+  new TonChain({ chainId: CHAIN_ID_TON_MAINNET, name: 'TON', explorerUrl: 'https://tonviewer.com', toncenter: { url: 'https://x' }, provider });
+
+describe('account transfers', () => {
+  it('reads both sides of a real relay: the fee payer sends and gets the rest back, the vault receives and sends it', async () => {
+    stubFetch(() => ({ status: 200, body: fixture('toncenter_trace_by_tx.json') }));
+    const trace = (await new ToncenterProvider(ENDPOINT).getTraceByTransaction(CHILD_TX)) as TonTrace;
+    const chain = chainWith(fakeProvider({ getTraceByTransaction: async () => trace }));
+    const [root, vaultTx, payback] = trace.transactions;
+    const relay = root.outMsgs[0];
+    const back = vaultTx.outMsgs[0];
+
+    const feePayer = (await chain.getAccountTransfers({ account: FEE_PAYER, txHash: CHILD_TX })) as TonAccountTransfers;
+    expect(feePayer.settled).toBe(true);
+    expect(feePayer.transfers.map(({ direction, asset, from, to, amount, transaction, final, bounced }) => ({ direction, asset, from, to, amount, tx: transaction.hash, final, bounced }))).toEqual([
+      { direction: 'SEND', asset: { kind: 'native' }, from: FEE_PAYER, to: vaultTx.account, amount: relay.value, tx: root.hash, final: true, bounced: false },
+      { direction: 'RECEIVE', asset: { kind: 'native' }, from: vaultTx.account, to: FEE_PAYER, amount: back.value, tx: payback.hash, final: true, bounced: false },
+    ]);
+
+    const vault = (await chain.getAccountTransfers({ account: tonUserFriendlyAddress(vaultTx.account, { bounceable: false }), txHash: CHILD_TX })) as TonAccountTransfers;
+    expect(vault.transfers.map(({ direction, amount }) => ({ direction, amount }))).toEqual([
+      { direction: 'RECEIVE', amount: relay.value },
+      { direction: 'SEND', amount: back.value },
+    ]);
+    await expect(chainWith(fakeProvider()).getAccountTransfers({ account: FEE_PAYER, txHash: CHILD_TX })).resolves.toBeNull();
+  });
+
+  it('reads a verified jetton transfer, with its comment, and not the TON riding along it', async () => {
+    const [root] = (await realTrace()).transactions;
+    const sender = root.account;
+    const RECIPIENT = OTHER;
+    const SENDER_JW = '0:' + '1a'.repeat(32);
+    const RECIPIENT_JW = '0:' + '2b'.repeat(32);
+    const transfer: TonTraceMessage = {
+      ...root.outMsgs[0],
+      destination: SENDER_JW,
+      value: 50_000_000n,
+      bounce: true,
+      opcode: 0x0f8a7ea5,
+      body: tonJettonTransferBody({ amount: 7_000_000n, destination: RECIPIENT, responseDestination: sender, forwardTonAmount: 1n, forwardPayload: tonCommentBody('order 42') }),
+    };
+    const internalTransfer: TonTraceMessage = {
+      ...transfer,
+      source: SENDER_JW,
+      destination: RECIPIENT_JW,
+      value: 40_000_000n,
+      opcode: TON_JETTON_INTERNAL_TRANSFER_OP,
+      createdLt: (transfer.createdLt as bigint) + 2n,
+      body: beginCell().storeUint(TON_JETTON_INTERNAL_TRANSFER_OP, 32).storeUint(0, 64).storeCoins(7_000_000n).storeAddress(Address.parse(sender)).storeAddress(Address.parse(sender)).storeCoins(1n).storeBit(false).endCell(),
+    };
+    const notification: TonTraceMessage = { ...internalTransfer, source: RECIPIENT_JW, destination: RECIPIENT, value: 1n, bounce: false, opcode: TON_JETTON_TRANSFER_NOTIFICATION_OP, createdLt: (transfer.createdLt as bigint) + 4n, body: beginCell().storeUint(TON_JETTON_TRANSFER_NOTIFICATION_OP, 32).endCell() };
+    const excesses: TonTraceMessage = { ...notification, destination: sender, value: 30_000_000n, opcode: TON_JETTON_EXCESSES_OP, createdLt: (transfer.createdLt as bigint) + 5n, body: beginCell().storeUint(TON_JETTON_EXCESSES_OP, 32).endCell() };
+    const tx = (hash: string, parent: string, account: string, inMsg: TonTraceMessage, outMsgs: TonTraceMessage[] = []): TonTraceTransaction => ({ ...root, hash: hash.repeat(32), parent, account, inMsg, outMsgs, success: true, aborted: false });
+    const senderJettonWallet = tx('c1', root.hash, SENDER_JW, transfer, [internalTransfer]);
+    const recipientJettonWallet = tx('c2', senderJettonWallet.hash, RECIPIENT_JW, internalTransfer, [notification, excesses]);
+    const trace: TonTrace = { complete: true, transactions: settled([{ ...root, outMsgs: [transfer] }, senderJettonWallet, recipientJettonWallet]) };
+    const chain = chainWith(
+      fakeProvider({
+        getTraceByTransaction: async () => trace,
+        getJettonWalletData: async (wallet: string) => (wallet === SENDER_JW ? { balance: 0n, owner: sender, jettonMaster: USDT_MASTER } : null),
+        getJettonWalletAddress: async (_master: string, owner: string) => (owner === sender ? SENDER_JW : owner === RECIPIENT ? RECIPIENT_JW : JETTON_WALLET),
+      }),
+    );
+    const jettonOf = (t: TonAccountTransfers) =>
+      t.transfers.map(({ direction, asset, from, to, amount, comment, transaction }) => ({ direction, asset, from, to, amount, comment, tx: transaction.hash }));
+    const expected = { asset: { kind: 'jetton', jettonMaster: USDT_MASTER }, from: sender, to: RECIPIENT, amount: 7_000_000n, comment: 'order 42', tx: recipientJettonWallet.hash };
+    expect(jettonOf((await chain.getAccountTransfers({ account: RECIPIENT, txHash: 'ab'.repeat(32) })) as TonAccountTransfers)).toEqual([{ direction: 'RECEIVE', ...expected }]);
+    // The sender's `transfer` message and the excesses coming back are part of the jetton transfer.
+    expect(jettonOf((await chain.getAccountTransfers({ account: sender, txHash: 'ab'.repeat(32) })) as TonAccountTransfers)).toEqual([{ direction: 'SEND', ...expected }]);
+
+    // A jetton wallet the master does not vouch for moves nothing.
+    const impostor = chainWith(fakeProvider({ getTraceByTransaction: async () => trace, getJettonWalletData: async () => ({ balance: 0n, owner: sender, jettonMaster: USDT_MASTER }) }));
+    expect((await impostor.getAccountTransfers({ account: RECIPIENT, txHash: 'ab'.repeat(32) }))?.transfers).toEqual([]);
+  });
+
+  it('does not count a message its receiver sent back, and marks the bounce coming back', async () => {
+    const [root, child] = (await realTrace()).transactions;
+    const sent: TonTraceMessage = { ...root.outMsgs[0], bounce: true };
+    const trace: TonTrace = { complete: true, transactions: settled([{ ...root, outMsgs: [sent] }, bouncing({ ...child, inMsg: sent })]) };
+    const chain = chainWith(fakeProvider({ getTraceByTransaction: async () => trace }));
+    const receiver = (await chain.getAccountTransfers({ account: child.account, txHash: 'ab'.repeat(32) })) as TonAccountTransfers;
+    expect(receiver.transfers).toEqual([]);
+    const sender = (await chain.getAccountTransfers({ account: root.account, txHash: 'ab'.repeat(32) })) as TonAccountTransfers;
+    expect(sender.transfers.map(({ direction, bounced }) => ({ direction, bounced }))).toEqual([
+      { direction: 'SEND', bounced: false },
+      { direction: 'RECEIVE', bounced: true },
+    ]);
+  });
+
+  it('marks a transfer final only once its transaction is, and the trace settled only when all are', async () => {
+    const [root, child] = (await realTrace()).transactions;
+    const second: TonTraceMessage = { ...root.outMsgs[0], createdLt: (root.outMsgs[0].createdLt as bigint) + 1n, value: 7n, body: tonCommentBody('hi') };
+    const trace: TonTrace = { complete: true, transactions: settled([{ ...root, outMsgs: [root.outMsgs[0], second] }, { ...child, mcSeqno: null }]) };
+    const result = (await chainWith(fakeProvider({ getTraceByTransaction: async () => trace })).getAccountTransfers({ account: root.account, txHash: 'ab'.repeat(32) })) as TonAccountTransfers;
+    expect(result.settled).toBe(false);
+    expect(result.transfers.map(({ index, final, comment }) => ({ index, final, comment }))).toEqual([
+      // The recorded transfer's own comment, read from mainnet data.
+      { index: 0, final: true, comment: '6fwZ2jecQsdpThG6HaDD7Q' },
+      { index: 1, final: true, comment: 'hi' },
+    ]);
+    const receiver = (await chainWith(fakeProvider({ getTraceByTransaction: async () => trace })).getAccountTransfers({ account: child.account, txHash: 'ab'.repeat(32) })) as TonAccountTransfers;
+    // Both messages reach the same account: the receipt in the transaction not yet final is not final; the other is.
+    expect(receiver.transfers.map(({ amount, final }) => ({ amount, final }))).toEqual([
+      { amount: root.outMsgs[0].value, final: false },
+      { amount: 7n, final: true },
+    ]);
   });
 });

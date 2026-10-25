@@ -18,11 +18,15 @@ import { TonAddress, tonRawAddress } from './ton_address.ts';
 import { TonAsset } from './ton_asset.ts';
 import { type TonJettonMetadata, type TonMetadataFetcher, readTonJettonMetadata } from './ton_jetton_metadata.ts';
 import {
+  TON_JETTON_EXCESSES_OP,
+  TON_JETTON_INTERNAL_TRANSFER_OP,
+  TON_JETTON_TRANSFER_NOTIFICATION_OP,
   TON_JETTON_TRANSFER_OP,
   TonSignedMessage,
   tonCommentBody,
   tonJettonTransferBody,
   tonJettonTransferCommentOf,
+  tonTextCommentOf,
   tonMessageHash,
   tonWalletRequestFields,
 } from './ton_messages.ts';
@@ -80,6 +84,47 @@ export interface TonJettonTransfer {
   /** The text comment the transfer forwards to the recipient, if any. */
   comment: string | null;
 }
+
+/** One transfer into or out of an account, as `TonChain.getAccountTransfers` reads it from a trace. */
+export interface TonAccountTransfer {
+  direction: 'RECEIVE' | 'SEND';
+  asset: { kind: 'native' } | { kind: 'jetton'; jettonMaster: string };
+  /** The sending owner, raw. */
+  from: string;
+  /** The receiving owner, raw. */
+  to: string;
+  /** Nanotons, or the jetton's smallest unit. */
+  amount: bigint;
+  /** The text comment it carried, if any. */
+  comment: string | null;
+  /**
+   * The transaction that moved it: for native TON the account's own (the one
+   * that received or sent it); for jettons the receiving jetton wallet's.
+   */
+  transaction: TonTraceTransaction;
+  /** Tells apart transfers moved by one transaction, in the order they were made. */
+  index: number;
+  /** That transaction is in a finalized masterchain block: the transfer will not change. */
+  final: boolean;
+  /** Native only: a bounce of a message the account had sent, coming back. */
+  bounced: boolean;
+}
+
+/** What an account sent and received in one trace. */
+export interface TonAccountTransfers {
+  trace: TonTrace;
+  /** The trace is complete and every transaction in it is final: no transfer will be added or change. */
+  settled: boolean;
+  transfers: TonAccountTransfer[];
+}
+
+/** The messages a jetton transfer is made of; the TON riding along them is part of the jetton transfer, not a payment. */
+const JETTON_PROTOCOL_OPS: ReadonlySet<number> = new Set([
+  TON_JETTON_TRANSFER_OP,
+  TON_JETTON_INTERNAL_TRANSFER_OP,
+  TON_JETTON_TRANSFER_NOTIFICATION_OP,
+  TON_JETTON_EXCESSES_OP,
+]);
 
 /** Where a signed request stands; see `TonChain.getRequestState`. */
 export type TonRequestState = 'live' | 'expired' | 'consumed';
@@ -557,8 +602,89 @@ export class TonChain extends Chain {
   }
 
   /**
-   * The wallet-to-wallet jetton transfers (TEP-74 \`transfer\` →
-   * \`internal_transfer\`) the trace completed: a jetton wallet accepted the
+   * The transfers into and out of `account` in the trace holding the
+   * transaction `txHash` — e.g. one a webhook named — or `null` while the
+   * providers have no trace of it. Emit only `final` transfers; once
+   * `settled`, the result will not change.
+   */
+  async getAccountTransfers(args: { account: string; txHash: string }): Promise<TonAccountTransfers | null> {
+    const trace = await this.getTraceByTransaction(args.txHash);
+    return trace === null ? null : this.accountTransfersOf(args.account, trace);
+  }
+
+  /**
+   * The transfers into and out of `account` in `trace`:
+   * - native TON it received — an incoming internal message whose value it
+   *   kept, not one its transaction sent back as a bounce — or sent, an
+   *   outgoing internal message; a bounce of its own message coming back is
+   *   a receipt marked `bounced`, and the bounce it sends back is no
+   *   transfer;
+   * - jettons it sent or received as owner ({@link getJettonTransfers});
+   * - the TON riding along a jetton transfer (`transfer`, `internal_transfer`,
+   *   `transfer_notification`, `excesses`) is part of it, not a native transfer.
+   */
+  async accountTransfersOf(account: string, trace: TonTrace): Promise<TonAccountTransfers> {
+    const owner = tonRawAddress(account);
+    const found: Array<Omit<TonAccountTransfer, 'index' | 'final'>> = [];
+    const isNativePayment = (message: TonTraceMessage): boolean =>
+      message.value > 0n && (message.opcode === null || !JETTON_PROTOCOL_OPS.has(message.opcode));
+    for (const tx of trace.transactions) {
+      if (tx.account !== owner) continue;
+      const inMsg = tx.inMsg;
+      if (inMsg !== null && inMsg.source !== null && isNativePayment(inMsg)) {
+        const sentBack = tx.aborted && tx.outMsgs.some((m) => m.bounced && m.destination === inMsg.source);
+        if (!sentBack) {
+          found.push({
+            direction: 'RECEIVE',
+            asset: { kind: 'native' },
+            from: inMsg.source,
+            to: owner,
+            amount: inMsg.value,
+            comment: tonTextCommentOf(inMsg.body),
+            transaction: tx,
+            bounced: inMsg.bounced,
+          });
+        }
+      }
+      for (const message of tx.outMsgs) {
+        if (message.destination === null || message.bounced || !isNativePayment(message)) continue;
+        found.push({
+          direction: 'SEND',
+          asset: { kind: 'native' },
+          from: owner,
+          to: message.destination,
+          amount: message.value,
+          comment: tonTextCommentOf(message.body),
+          transaction: tx,
+          bounced: false,
+        });
+      }
+    }
+    for (const jetton of await this.getJettonTransfers(trace)) {
+      const common = {
+        asset: { kind: 'jetton' as const, jettonMaster: jetton.jettonMaster },
+        from: jetton.from,
+        to: jetton.to,
+        amount: jetton.amount,
+        comment: jetton.comment,
+        transaction: jetton.transaction,
+        bounced: false,
+      };
+      if (jetton.from === owner) found.push({ ...common, direction: 'SEND' });
+      if (jetton.to === owner) found.push({ ...common, direction: 'RECEIVE' });
+    }
+    const perTransaction = new Map<string, number>();
+    const transfers = found.map((transfer) => {
+      const index = perTransaction.get(transfer.transaction.hash) ?? 0;
+      perTransaction.set(transfer.transaction.hash, index + 1);
+      return { ...transfer, index, final: transfer.transaction.mcSeqno !== null };
+    });
+    return { trace, settled: trace.complete && trace.transactions.every((tx) => tx.mcSeqno !== null), transfers };
+  }
+
+  /**
+   * The wallet-to-wallet jetton transfers (TEP-74 `transfer` →
+   * `internal_transfer`) the trace completed: a jetton wallet accepted the
    * jettons. Each counts only once its master vouches for both jetton wallets:
    * the sender's must be the master's wallet for the owner it reports, and
    * the receiving one the master's wallet for the recipient the transfer
@@ -615,7 +741,7 @@ export class TonChain extends Chain {
   }
 }
 
-/** The recipient owner a jetton \`transfer\` names, raw; \`null\` for any other message. */
+/** The recipient owner a jetton `transfer` names, raw; `null` for any other message. */
 function jettonTransferDestinationOf(message: TonTraceMessage): string | null {
   if (message.opcode !== TON_JETTON_TRANSFER_OP || message.body === null) return null;
   try {

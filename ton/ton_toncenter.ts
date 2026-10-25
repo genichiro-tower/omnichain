@@ -302,6 +302,7 @@ function toTransaction(tx: Record<string, unknown>, parent: string | null): TonT
   const finalized = tx.finality === undefined || tx.finality === 'finalized';
   return {
     hash: base64ToHex(String(tx.hash)),
+    lt: asBigInt(tx.lt, 'lt'),
     parent,
     account: tonRawAddress(String(tx.account)),
     ...tonTransactionOutcome(phasesOf(tx)),

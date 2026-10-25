@@ -316,6 +316,7 @@ function toTransaction(tx: Record<string, unknown>, parent: string | null, mcSeq
   const raw = rawTransactionOf(tx);
   return {
     hash: raw.hash().toString('hex'),
+    lt: raw.lt,
     parent,
     account: tonRawAddress(String(asRecord(tx.account, 'account').address)),
     ...tonTransactionOutcome(phasesOf(raw)),

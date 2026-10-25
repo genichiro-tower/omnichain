@@ -36,6 +36,8 @@ export interface TonTraceMessage {
 export interface TonTraceTransaction {
   /** Lowercase hex. */
   hash: string;
+  /** Its logical time, which orders an account's transactions. */
+  lt: bigint;
   /** The transaction whose outgoing message this one received; `null` for the root. */
   parent: string | null;
   /** Canonical raw address. */
