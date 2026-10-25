@@ -117,6 +117,42 @@ export function tonJettonTransferBody(args: TonJettonTransferBodyArgs): Cell {
     : builder.storeBit(true).storeRef(args.forwardPayload).endCell();
 }
 
+/** A jetton wallet telling its owner it received jettons (TEP-74). */
+export const TON_JETTON_TRANSFER_NOTIFICATION_OP = 0x7362d09c;
+/** A jetton wallet returning the TON a transfer did not use (TEP-74). */
+export const TON_JETTON_EXCESSES_OP = 0xd53276db;
+
+/** The text of a comment body (op 0), or `null` for any other or unreadable body. */
+export function tonTextCommentOf(body: Cell | null): string | null {
+  if (body === null || body.bits.length < 32) return null;
+  try {
+    const slice = body.beginParse();
+    if (slice.loadUint(32) !== TON_COMMENT_OP) return null;
+    return slice.loadStringTail();
+  } catch {
+    return null;
+  }
+}
+
+/** The text comment a jetton `transfer` body forwards to the recipient (its forward payload), or `null`. */
+export function tonJettonTransferCommentOf(body: Cell | null): string | null {
+  if (body === null) return null;
+  try {
+    const slice = body.beginParse();
+    if (slice.loadUint(32) !== TON_JETTON_TRANSFER_OP) return null;
+    slice.loadUintBig(64);
+    slice.loadCoins();
+    slice.loadAddress();
+    slice.loadMaybeAddress();
+    slice.loadMaybeRef();
+    slice.loadCoins();
+    const payload = slice.loadBit() ? slice.loadRef() : beginCell().storeSlice(slice).endCell();
+    return tonTextCommentOf(payload);
+  } catch {
+    return null;
+  }
+}
+
 export const TON_W5_SIGNED_INTERNAL_OP = 0x73696e74;
 export const TON_W5_SIGNED_EXTERNAL_OP = 0x7369676e;
 

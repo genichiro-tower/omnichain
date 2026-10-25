@@ -36,6 +36,8 @@ export interface TonTraceMessage {
 export interface TonTraceTransaction {
   /** Lowercase hex. */
   hash: string;
+  /** Its logical time, which orders an account's transactions. */
+  lt: bigint;
   /** The transaction whose outgoing message this one received; `null` for the root. */
   parent: string | null;
   /** Canonical raw address. */
@@ -97,10 +99,27 @@ export interface TonProvider {
   sendBoc(boc: string): Promise<void>;
   /** By the normalized external-message hash (hex); `null` while the provider has not seen it. */
   getTrace(hash: string): Promise<TonTrace | null>;
+  /** The whole trace holding the transaction `txHash` (hex), from its root; `null` while the provider has not seen it. */
+  getTraceByTransaction(txHash: string): Promise<TonTrace | null>;
+  /** The account's transactions with an lt above `afterLt`, oldest first, at most `limit` (1 to 100). */
+  getAccountTransactions(account: string, opts: { afterLt: bigint; limit: number }): Promise<TonAccountTransaction[]>;
+  /** The lt of the account's last transaction; 0 for an account that never had one, as the provider states it. */
+  getLastTransactionLt(account: string): Promise<bigint>;
   /** Emulates the whole trace of an external message, ignoring its signature. */
   emulate(boc: string): Promise<TonTrace>;
   /** The latest masterchain block the provider has applied: its seqno and generation time (unix seconds). */
   getMasterchainHead(): Promise<TonMasterchainHead>;
+}
+
+/** One of an account's transactions, as listed after a cursor. */
+export interface TonAccountTransaction {
+  /** Lowercase hex. */
+  hash: string;
+  lt: bigint;
+  /** Unix seconds. */
+  utime: number;
+  /** The masterchain block that finalized it; `null` while it is not final. */
+  mcSeqno: number | null;
 }
 
 export interface TonJettonWalletData {
@@ -213,6 +232,18 @@ export class TonFallbackProvider implements TonProvider {
 
   getTrace(hash: string): Promise<TonTrace | null> {
     return this.call('getTrace', (p) => p.getTrace(hash));
+  }
+
+  getTraceByTransaction(txHash: string): Promise<TonTrace | null> {
+    return this.call('getTraceByTransaction', (p) => p.getTraceByTransaction(txHash));
+  }
+
+  getAccountTransactions(account: string, opts: { afterLt: bigint; limit: number }): Promise<TonAccountTransaction[]> {
+    return this.call('getAccountTransactions', (p) => p.getAccountTransactions(account, opts));
+  }
+
+  getLastTransactionLt(account: string): Promise<bigint> {
+    return this.call('getLastTransactionLt', (p) => p.getLastTransactionLt(account));
   }
 
   emulate(boc: string): Promise<TonTrace> {
@@ -574,6 +605,27 @@ export function assertTraceOf(source: string, hash: string, trace: TonTrace): To
     throw new TonProviderError(ChainErrorKinds.RpcError, `${source} returned the trace of another message than ${hash}`, true);
   }
   return trace;
+}
+
+/** The trace a provider returned for the transaction `txHash` must hold it. */
+export function assertTraceHolds(source: string, txHash: string, trace: TonTrace): TonTrace {
+  if (!trace.transactions.some((tx) => tx.hash === txHash)) {
+    throw new TonProviderError(ChainErrorKinds.RpcError, `${source} returned a trace that does not hold transaction ${txHash}`, true);
+  }
+  return trace;
+}
+
+/** The most account transactions one call returns. */
+export const TON_MAX_ACCOUNT_TRANSACTIONS = 100;
+
+/** Refuses a page size outside 1 to {@link TON_MAX_ACCOUNT_TRANSACTIONS} and a negative cursor. */
+export function assertAccountTransactionsQuery(opts: { afterLt: bigint; limit: number }): void {
+  if (!Number.isInteger(opts.limit) || opts.limit < 1 || opts.limit > TON_MAX_ACCOUNT_TRANSACTIONS) {
+    throw new TonProviderError(ChainErrorKinds.InvalidArgument, `limit must be 1 to ${TON_MAX_ACCOUNT_TRANSACTIONS}, got ${opts.limit}`, false);
+  }
+  if (typeof opts.afterLt !== 'bigint' || opts.afterLt < 0n) {
+    throw new TonProviderError(ChainErrorKinds.InvalidArgument, `afterLt must be a non-negative bigint, got ${String(opts.afterLt)}`, false);
+  }
 }
 
 const TX_HASH_REGEX = /^[0-9a-f]{64}$/;

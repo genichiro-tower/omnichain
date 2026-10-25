@@ -5,6 +5,7 @@ import { tonRawAddress } from './ton_address.ts';
 import { parseTonAddress } from './ton_messages.ts';
 import {
   type TonAccountState,
+  type TonAccountTransaction,
   type TonHttpEndpoint,
   type TonJettonWalletData,
   type TonMasterchainHead,
@@ -21,7 +22,9 @@ import {
   asRequiredRecord,
   asStatedAccountStatus,
   assertTonTxHash,
+  assertAccountTransactionsQuery,
   assertTraceConsistent,
+  assertTraceHolds,
   assertTraceOf,
   asRecord,
   definiteError,
@@ -128,7 +131,54 @@ export class ToncenterProvider implements TonProvider {
   }
 
   async getTrace(hash: string): Promise<TonTrace | null> {
-    const reply = await tonHttpJson(NAME, this.endpoint, `/api/v3/traces?msg_hash=${encodeURIComponent(hexToBase64(assertTonTxHash(hash)))}`, {
+    const trace = await this.traceBy('msg_hash', hash);
+    return trace === null ? null : assertTraceOf(NAME, hash, trace);
+  }
+
+  async getTraceByTransaction(txHash: string): Promise<TonTrace | null> {
+    const trace = await this.traceBy('tx_hash', txHash);
+    return trace === null ? null : assertTraceHolds(NAME, txHash, trace);
+  }
+
+  async getAccountTransactions(account: string, opts: { afterLt: bigint; limit: number }): Promise<TonAccountTransaction[]> {
+    assertAccountTransactionsQuery(opts);
+    // TON Center's start_lt is inclusive.
+    const query = new URLSearchParams({
+      account: tonRawAddress(account),
+      start_lt: String(opts.afterLt + 1n),
+      sort: 'asc',
+      limit: String(opts.limit),
+    });
+    const reply = await tonHttpJson(NAME, this.endpoint, `/api/v3/transactions?${query.toString()}`, { headers: this.headers() });
+    if (reply === null || !Array.isArray((reply as Record<string, unknown>).transactions)) {
+      throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} returned no transaction list for ${account}`, true);
+    }
+    return ((reply as Record<string, unknown[]>).transactions).map((item) => {
+      const tx = asRequiredRecord(item, 'transaction');
+      const finalized = tx.finality === undefined || tx.finality === 'finalized';
+      return {
+        hash: base64ToHex(String(tx.hash)),
+        lt: asBigInt(tx.lt, 'lt'),
+        utime: asRequiredInteger(tx.now, 'now'),
+        mcSeqno: finalized && typeof tx.mc_block_seqno === 'number' ? tx.mc_block_seqno : null,
+      };
+    });
+  }
+
+  async getLastTransactionLt(account: string): Promise<bigint> {
+    const path = `/api/v3/accountStates?address=${encodeURIComponent(tonRawAddress(account))}&include_boc=false`;
+    const reply = await tonHttpJson(NAME, this.endpoint, path, { headers: this.headers() });
+    if (reply === null || !Array.isArray((reply as Record<string, unknown>).accounts)) {
+      throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} returned no account list for ${account}`, true);
+    }
+    const accounts = (reply as Record<string, unknown[]>).accounts;
+    if (accounts.length === 0) return 0n;
+    return asBigInt(asRequiredRecord(accounts[0], 'account').last_transaction_lt, 'last_transaction_lt');
+  }
+
+  /** The trace found by `param`, checked; `null` on TON Center's explicit empty list. */
+  private async traceBy(param: 'msg_hash' | 'tx_hash', hash: string): Promise<TonTrace | null> {
+    const reply = await tonHttpJson(NAME, this.endpoint, `/api/v3/traces?${param}=${encodeURIComponent(hexToBase64(assertTonTxHash(hash)))}`, {
       headers: this.headers(),
     });
     // Only an explicit empty list means no trace; anything else says nothing.
@@ -146,7 +196,7 @@ export class ToncenterProvider implements TonProvider {
     if (finished && missing) {
       throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} returned a finished trace with transactions left out`, true);
     }
-    return assertTraceOf(NAME, hash, assertTraceConsistent(NAME, { complete: finished && !missing, transactions }));
+    return assertTraceConsistent(NAME, { complete: finished && !missing, transactions });
   }
 
   async emulate(boc: string): Promise<TonTrace> {
@@ -252,6 +302,7 @@ function toTransaction(tx: Record<string, unknown>, parent: string | null): TonT
   const finalized = tx.finality === undefined || tx.finality === 'finalized';
   return {
     hash: base64ToHex(String(tx.hash)),
+    lt: asBigInt(tx.lt, 'lt'),
     parent,
     account: tonRawAddress(String(tx.account)),
     ...tonTransactionOutcome(phasesOf(tx)),

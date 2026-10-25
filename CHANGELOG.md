@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-10-25
+
+TON: an account's transfers from a transaction hash, with finality — what a deposit watcher (clydner, via TonAPI webhooks) needs. Additive.
+
+### Added
+
+- **`TonChain.getAccountTransfers({ account, txHash })`** (and `accountTransfersOf(account, trace)`): the native TON and jetton transfers into and out of an account in the trace holding a transaction. Each has its direction, asset, owners, amount, text comment, the transaction that moved it, an `index` (with the transaction and direction it names the transfer, the same on every read and provider), and `final` (that transaction is finalized — and, for a native transfer shaped like a jetton message, the trace is complete — so it never changes later); `settled` once the trace is complete and all of it final. A received message counts unless the account sent it back as a bounce; a bounce of its own message coming back is marked `bounced`; the TON riding along a jetton transfer is part of it. Jettons count only when their master vouches for both jetton wallets.
+- **`TonChain.getJettonTransfers(trace)`**: the verified wallet-to-wallet jetton transfers of a trace (the jetton balance changes now build on it).
+- **`getTraceByTransaction(txHash)`** (providers and `TonChain`): the whole trace holding an account transaction, from its root; refused unless it holds it.
+- **`getAccountTransactions(account, { afterLt, limit })`**: transactions after a cursor, oldest first, alike on both providers (TON Center's inclusive `start_lt`, TonAPI's exclusive `after_lt`).
+- **`getLastTransactionLt(account)`**: 0 only for an account that never had a transaction — one that does not exist but bounced a message still has its lt. On TonAPI it is read from the transaction list: its raw account states 0 for such an account.
+- `TonTraceTransaction.lt`; `tonJettonCreditsOf`, `tonTextCommentOf`, `tonJettonTransferCommentOf`; the jetton notification and excesses ops.
+
 ## [0.7.0] — 2026-10-21
 
 TON: a chain, W5 wallets, and requests one wallet signs and another delivers and pays for. Mainnet only. See `docs/ton.md`.

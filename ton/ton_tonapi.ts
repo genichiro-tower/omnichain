@@ -4,6 +4,7 @@ import { ChainErrorKinds } from '../errors.ts';
 import { tonRawAddress } from './ton_address.ts';
 import {
   type TonAccountState,
+  type TonAccountTransaction,
   type TonHttpEndpoint,
   type TonJettonWalletData,
   type TonMasterchainHead,
@@ -16,9 +17,12 @@ import {
   asBigInt,
   asRecord,
   asRequiredInteger,
+  asRequiredRecord,
   asStatedAccountStatus,
   assertTonTxHash,
+  assertAccountTransactionsQuery,
   assertTraceConsistent,
+  assertTraceHolds,
   assertTraceOf,
   definiteError,
   errorMessageOf,
@@ -131,6 +135,52 @@ export class TonapiProvider implements TonProvider {
   }
 
   async getTrace(hash: string): Promise<TonTrace | null> {
+    const trace = await this.traceAt(hash);
+    return trace === null ? null : assertTraceOf(NAME, hash, trace);
+  }
+
+  // `/v2/traces/{id}` takes a transaction hash as well as a message hash.
+  async getTraceByTransaction(txHash: string): Promise<TonTrace | null> {
+    const trace = await this.traceAt(txHash);
+    return trace === null ? null : assertTraceHolds(NAME, txHash, trace);
+  }
+
+  async getAccountTransactions(account: string, opts: { afterLt: bigint; limit: number }): Promise<TonAccountTransaction[]> {
+    assertAccountTransactionsQuery(opts);
+    const query = new URLSearchParams({ after_lt: String(opts.afterLt), limit: String(opts.limit), sort_order: 'asc' });
+    const reply = await this.get(`/v2/blockchain/accounts/${encodeURIComponent(tonRawAddress(account))}/transactions?${query.toString()}`);
+    if (reply === null) {
+      // A never-used account has no transactions; anything else answering 404 says nothing.
+      if ((await this.getAccountState(account)).status === 'nonexist') return [];
+      throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} returned no transaction list for ${account}`, true);
+    }
+    const list = asRecord(reply, 'transactions').transactions;
+    if (!Array.isArray(list)) throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} returned no transaction list for ${account}`, true);
+    // TonAPI serves committed blocks only; the masterchain block is read as for a trace.
+    const raw = list.map((item) => asRequiredRecord(item, 'transaction'));
+    const parsed = await this.withMasterchainSeqnos(raw.map((tx) => ({ tx, parent: null })));
+    return parsed.map((tx, index) => ({ hash: tx.hash, lt: asBigInt(raw[index].lt, 'lt'), utime: tx.utime, mcSeqno: tx.mcSeqno }));
+  }
+
+  /**
+   * The newest transaction's lt. TonAPI's raw account is no source for it: for
+   * an account that does not exist but had transactions (one that bounced a
+   * message), it states `last_transaction_lt: 0` (seen on mainnet) while its
+   * transaction list holds them. 0 needs an empty list and the account stated
+   * `nonexist`.
+   */
+  async getLastTransactionLt(account: string): Promise<bigint> {
+    const raw = encodeURIComponent(tonRawAddress(account));
+    const newest = await this.get(`/v2/blockchain/accounts/${raw}/transactions?limit=1&sort_order=desc`);
+    const list = newest === null ? [] : asRecord(newest, 'transactions').transactions;
+    if (!Array.isArray(list)) throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} returned no transaction list for ${account}`, true);
+    if (list.length > 0) return asBigInt(asRequiredRecord(list[0], 'transaction').lt, 'lt');
+    if ((await this.getAccountState(account)).status === 'nonexist') return 0n;
+    throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} returned no account for ${account}`, true);
+  }
+
+  /** The trace at a hash, checked; `null` on 404 and for TonAPI's emulation of a message in flight. */
+  private async traceAt(hash: string): Promise<TonTrace | null> {
     // TonAPI answers a hash it has no trace for with 404.
     const reply = await this.get(`/v2/traces/${encodeURIComponent(assertTonTxHash(hash))}`);
     if (reply === null) return null;
@@ -139,7 +189,7 @@ export class TonapiProvider implements TonProvider {
     if ((reply as TonapiTraceNode).emulated === true) return null;
     const root = withoutEmulated(reply as TonapiTraceNode);
     const transactions = await this.withMasterchainSeqnos(flatten(root));
-    return assertTraceOf(NAME, hash, assertTraceConsistent(NAME, { complete: isComplete(root), transactions }));
+    return assertTraceConsistent(NAME, { complete: isComplete(root), transactions });
   }
 
   async emulate(boc: string): Promise<TonTrace> {
@@ -273,6 +323,7 @@ function toTransaction(tx: Record<string, unknown>, parent: string | null, mcSeq
   const raw = rawTransactionOf(tx);
   return {
     hash: raw.hash().toString('hex'),
+    lt: raw.lt,
     parent,
     account: tonRawAddress(String(asRecord(tx.account, 'account').address)),
     ...tonTransactionOutcome(phasesOf(raw)),
