@@ -23,6 +23,7 @@ import {
   tonOutActions,
 } from './ton_messages.ts';
 import { TonSignedTransaction, TonUnsignedTransaction } from './ton_transactions.ts';
+import { type TonWalletContract, type TonWorkchain, tonWalletContract } from './ton_wallet_contracts.ts';
 
 const TON_COIN_TYPE = 607;
 const TON_DERIVATION_PATH_REGEX = /^m\/44'\/607'\/(\d+)'$/;
@@ -55,11 +56,6 @@ export function deriveTonEd25519Seed(bip39Seed: Uint8Array, index: number): Buff
   return deriveSlip10Ed25519Seed(bip39Seed, [44, TON_COIN_TYPE, index]);
 }
 
-export const TON_WALLET_VERSIONS: readonly TonWalletVersion[] = ['v3r2', 'v4r2', 'v5r1'];
-/** The workchains a wallet can live on: the basechain (0) and the masterchain (-1). */
-export type TonWorkchain = 0 | -1;
-/** The v3r2 / v4r2 wallet id the Python SDK uses on both workchains. */
-export const TON_LEGACY_DEFAULT_WALLET_ID = 698983191;
 /** v3r2 / v4r2 send at most four messages per request. */
 export const TON_LEGACY_MAX_MESSAGES = 4;
 
@@ -114,7 +110,7 @@ export class TonWallet extends AbstractBip32StyleSingleAccountWallet {
   readonly version: TonWalletVersion;
   /** 0 (the basechain, the default) or -1 (the masterchain, where gas and storage cost far more). */
   readonly workchain: TonWorkchain;
-  readonly contract: WalletContractV5R1 | WalletContractV4 | WalletContractV3R2;
+  readonly contract: TonWalletContract;
   readonly #secretKey: Buffer;
   private readonly _address: string;
 
@@ -124,29 +120,13 @@ export class TonWallet extends AbstractBip32StyleSingleAccountWallet {
       throw new ChainError(ChainErrorKinds.InvalidArgument, `A TON ed25519 seed is 32 bytes, got ${ed25519Seed.length}`);
     }
     const version = opts.version ?? 'v5r1';
-    if (!TON_WALLET_VERSIONS.includes(version)) {
-      throw new ChainError(ChainErrorKinds.InvalidArgument, `TON wallet version must be one of ${TON_WALLET_VERSIONS.join(', ')}, got ${String(version)}`);
-    }
     const workchain = opts.workchain ?? 0;
-    if (workchain !== 0 && workchain !== -1) {
-      throw new ChainError(ChainErrorKinds.InvalidArgument, `A TON wallet lives on workchain 0 or -1, got ${String(workchain)}`);
-    }
     const keyPair = keyPairFromSeed(Buffer.from(ed25519Seed));
+    this.contract = tonWalletContract(keyPair.publicKey, version, workchain);
     this.publicKey = keyPair.publicKey;
     this.#secretKey = keyPair.secretKey;
     this.version = version;
     this.workchain = workchain;
-    // The wallet ids the Python SDK (ton_core) uses on either workchain: W5's
-    // context names workchain 0 (as @ton/ton's default does), and v3r2 /
-    // v4r2's is 698983191 whatever the wallet's workchain — where @ton/ton
-    // would add the workchain, giving another address on -1.
-    const publicKey = keyPair.publicKey;
-    this.contract =
-      version === 'v5r1'
-        ? WalletContractV5R1.create({ workchain, publicKey })
-        : version === 'v4r2'
-          ? WalletContractV4.create({ workchain, publicKey, walletId: TON_LEGACY_DEFAULT_WALLET_ID })
-          : WalletContractV3R2.create({ workchain, publicKey, walletId: TON_LEGACY_DEFAULT_WALLET_ID });
     this._address = this.contract.address.toRawString();
   }
 

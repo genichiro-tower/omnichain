@@ -11,3 +11,4 @@ export * from './ton_toncenter.ts';
 export * from './ton_transaction_status.ts';
 export * from './ton_transactions.ts';
 export * from './ton_wallet.ts';
+export * from './ton_wallet_contracts.ts';
