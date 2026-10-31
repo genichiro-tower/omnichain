@@ -70,6 +70,19 @@ export class TonapiProvider implements TonProvider {
     return asRequiredInteger(asRecord(reply, 'seqno').seqno, 'seqno');
   }
 
+  async getPublicKey(address: string): Promise<bigint> {
+    // TonAPI answers a getter an account lacks with 404 or a failed result.
+    const reply = await this.get(this.getMethodPath(address, 'get_public_key', []));
+    const result = reply === null ? null : asRecord(reply, 'get_public_key');
+    if (result === null || result.success !== true || Number(result.exit_code ?? 0) !== 0) {
+      throw definiteError(ChainErrorKinds.RpcError, `${address} answers no get_public_key`);
+    }
+    const stack = Array.isArray(result.stack) ? result.stack : [];
+    const first = stack[0] === undefined ? null : asRecord(stack[0], 'stack item');
+    if (first === null || first.type !== 'num') throw definiteError(ChainErrorKinds.RpcError, `${NAME} returned no public key`);
+    return asBigInt(first.num, 'public key');
+  }
+
   async getJettonWalletAddress(jettonMaster: string, owner: string): Promise<string> {
     const result = await this.runGetMethod(jettonMaster, 'get_wallet_address', [tonRawAddress(owner)]);
     const decoded = result === null ? null : result.decoded;

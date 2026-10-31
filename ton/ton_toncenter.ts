@@ -78,6 +78,18 @@ export class ToncenterProvider implements TonProvider {
     return asRequiredInteger(String(numAt(reply.stack as ToncenterStackItem[], 0, 'seqno')), 'seqno');
   }
 
+  async getPublicKey(address: string): Promise<bigint> {
+    const reply = await this.runGetMethodReply(address, 'get_public_key', []);
+    if (errorMessageOf(reply) !== null) {
+      throw new TonProviderError(ChainErrorKinds.RpcError, `${NAME} could not run get_public_key on ${address}`, true);
+    }
+    // A VM exit code is the chain's answer: no code, or no such getter.
+    if (Number(reply.exit_code) !== 0 || !Array.isArray(reply.stack)) {
+      throw definiteError(ChainErrorKinds.RpcError, `${address} answers no get_public_key`);
+    }
+    return numAt(reply.stack as ToncenterStackItem[], 0, 'public key');
+  }
+
   async getJettonWalletAddress(jettonMaster: string, owner: string): Promise<string> {
     const ownerSlice = beginCell().storeAddress(parseTonAddress(owner)).endCell().toBoc().toString('base64');
     const result = await this.runGetMethod(jettonMaster, 'get_wallet_address', [{ type: 'slice', value: ownerSlice }]);
