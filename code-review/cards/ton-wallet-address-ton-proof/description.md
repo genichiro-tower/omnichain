@@ -109,7 +109,7 @@ nonce?
     usual fallback (`ton_provider.ts:184-260`).
   - `verifyTonProof` is therefore `async`.
 - **R4. Exports** from `@getomnichain/omnichain/ton`; `docs/ton.md` documents
-  both; a minor release (0.8.0).
+  both; a patch release (0.7.2).
 
 ---
 
@@ -152,7 +152,7 @@ nonce?
 
 ## Dependencies / blockers
 
-- None. rango-intents `intents7` and `intents9` bump to this release.
+- None. rango-intents `intents7` and `intents9` bump to this release (0.7.2).
 
 ---
 
