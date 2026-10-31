@@ -5,6 +5,7 @@ export * from './ton_chain.ts';
 export * from './ton_chains.ts';
 export * from './ton_jetton_metadata.ts';
 export * from './ton_messages.ts';
+export * from './ton_proof.ts';
 export * from './ton_provider.ts';
 export * from './ton_tonapi.ts';
 export * from './ton_toncenter.ts';
