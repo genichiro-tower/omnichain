@@ -183,6 +183,19 @@ nonce?
 
 # Deviations from the plan
 
+- **A proof may be up to 60 s ahead of `now`** (R2 step 3 said "not in the
+  future"). Wallet clocks run slightly ahead; TonConnect's own verifier checks
+  only the age.
+- **No byte caps on the domain and payload** (R2's 128/128/222). They bound
+  what a dapp may request, and a real Tonkeeper proof (TonProof.NET's recorded
+  v4r2) carries a 291-byte payload. Equality with the issued payload binds it.
+- **`version` is `TonWalletVersion | 'wallet_tg'`**, naming Telegram Wallet's
+  trampoline.
+- **AC2's recorded proof is TonProof.NET's** (MIT): a mainnet v4r2 Tonkeeper
+  proof, with its v3r1 and testnet W5 beta samples as refusals. W5 beta is not
+  v5r1 and is refused as `unsupported_wallet`; v5r1 is exercised with proofs
+  signed in the spec.
+
 ---
 
 # Follow-ups raised
