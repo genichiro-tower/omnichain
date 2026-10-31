@@ -1,6 +1,6 @@
 import { createHmac, pbkdf2Sync } from 'node:crypto';
 
-import { type Cell, SendMode, type StateInit, beginCell, external, storeMessage, storeMessageRelaxed } from '@ton/core';
+import { type Cell, SendMode, type StateInit, beginCell, external, storeMessage, storeMessageRelaxed, storeStateInit } from '@ton/core';
 import { keyPairFromSeed, sign } from '@ton/crypto';
 import { WalletContractV3R2, WalletContractV4, WalletContractV5R1 } from '@ton/ton';
 
@@ -22,6 +22,8 @@ import {
   tonNormalizedExternalHash,
   tonOutActions,
 } from './ton_messages.ts';
+import { type TonProofInput, tonProofDigest } from './ton_proof.ts';
+import { type TonSignDataTextResult, tonSignDataTextDigest } from './ton_sign_data.ts';
 import { TonSignedTransaction, TonUnsignedTransaction } from './ton_transactions.ts';
 import { type TonWalletContract, type TonWorkchain, tonWalletContract } from './ton_wallet_contracts.ts';
 
@@ -301,6 +303,40 @@ export class TonWallet extends AbstractBip32StyleSingleAccountWallet {
   /** An ed25519 signature over {@link tonMessageHash}, hex; never over the message's bytes, which could pass for a request hash. */
   signMessage(message: string): TonSignedMessage {
     return new TonSignedMessage(sign(tonMessageHash(message), this.#secretKey).toString('hex'));
+  }
+
+  /**
+   * A TonConnect `ton_proof` of this wallet, as a wallet app would give it:
+   * for signing in where a wallet app is not at hand (`TonChain.verifyTonProof`).
+   */
+  signTonProof(args: { domain: string; payload: string; timestamp?: number }): TonProofInput {
+    const timestamp = args.timestamp ?? Math.floor(Date.now() / 1000);
+    const address = new TonAddress(this._address);
+    return {
+      address: this._address,
+      network: '-239',
+      publicKey: this.publicKey.toString('hex'),
+      proof: {
+        timestamp,
+        domain: { lengthBytes: Buffer.byteLength(args.domain, 'utf8'), value: args.domain },
+        payload: args.payload,
+        signature: sign(tonProofDigest(address, args.domain, timestamp, args.payload), this.#secretKey).toString('base64'),
+        stateInit: beginCell().store(storeStateInit(this.stateInit)).endCell().toBoc().toString('base64'),
+      },
+    };
+  }
+
+  /** A TonConnect `signData` of `text`, as a wallet app would give it (`verifyTonSignData`). */
+  signTextData(args: { text: string; domain: string; timestamp?: number }): TonSignDataTextResult {
+    const timestamp = args.timestamp ?? Math.floor(Date.now() / 1000);
+    const digest = tonSignDataTextDigest(new TonAddress(this._address), args.domain, timestamp, args.text);
+    return {
+      signature: sign(digest, this.#secretKey).toString('base64'),
+      address: this._address,
+      timestamp,
+      domain: args.domain,
+      payload: { type: 'text', text: args.text },
+    };
   }
 
   verifySignature(message: string, signedMessage: AbstractSignedMessage): boolean {

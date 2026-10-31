@@ -112,6 +112,20 @@ const result = await TonMainnet.verifyTonProof(
 
 Reasons: `network`, `domain`, `expired`, `payload`, `address`, `unsupported_wallet` (another contract, W5 beta and v3r1 among them, or a Telegram Wallet account that is not running the trampoline), `public_key`, `signature`, and `provider` — the chain could not be read, so the same proof may verify on a retry. It never throws on what the wallet sent; an invalid `now` or a `maxAgeSeconds` that is not a positive finite number throws `InvalidArgument`, as it would leave the age unchecked. Only Telegram Wallet reads the chain (`getAccountState`, `getPublicKey`), so a chain without provider keys verifies every other wallet. TonConnect's 128-byte caps on the domain and payload bound what a dapp may request, not what was signed: the payload is bound by being the issued one.
 
+## Signing text: TonConnect `signData`
+
+```ts
+const result = verifyTonSignData(signDataResult, { // the signData result as the wallet returns it
+  publicKey,                  // the signer's key: e.g. from its ton_proof sign-in
+  expectedAddress, expectedDomain, expectedText, // maxAgeSeconds (600), now
+});
+// { ok: true } | { ok: false, reason: 'payload' | 'address' | 'domain' | 'expired' | 'signature' }
+```
+
+Text payloads only. The wallet signs ed25519 over `sha256(0xffff ‖ "ton-connect/sign-data/" ‖ workchain (int32 BE) ‖ account hash ‖ domain length (uint32 BE) ‖ domain ‖ timestamp (uint64 BE) ‖ "txt" ‖ text length (uint32 BE) ‖ text)` (`tonSignDataTextDigest`) — big-endian throughout, unlike `ton_proof`. A TON address does not reveal its key, so the caller supplies it. Never throws on what the wallet sent; an unusable key, `now` or `maxAgeSeconds` throws `InvalidArgument`. Not every wallet app offers `signData`.
+
+Without a wallet app, a `TonWallet` gives both results a wallet app would: `signTonProof({ domain, payload })` for sign-in, `signTextData({ text, domain })` for text — each with an optional `timestamp`.
+
 ## Messages and relaying
 
 `TonOutMessage` is `{ to, value, body?, bounce?, stateInit?, mode? }`; at most 255 per request. `bounce` defaults to whether there is a body; `mode` to `PAY_GAS_SEPARATELY`.

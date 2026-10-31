@@ -3,8 +3,8 @@ import { createHash } from 'node:crypto';
 import { Cell, type StateInit, contractAddress, loadStateInit } from '@ton/core';
 import { signVerify } from '@ton/crypto';
 
-import { ChainError, ChainErrorKinds } from '../errors.ts';
 import { TonAddress } from './ton_address.ts';
+import { tonConnectBase64, tonConnectTimestamp, tonConnectWindow } from './ton_connect_time.ts';
 import type { TonWalletVersion } from './ton_messages.ts';
 import { type TonProvider, TonProviderError } from './ton_provider.ts';
 import { TON_WALLET_VERSIONS, tonWalletContract } from './ton_wallet_contracts.ts';
@@ -15,9 +15,6 @@ export const TON_CONNECT_MAINNET = '-239';
 /** Telegram Wallet's in-app wallet: a trampoline contract whose key can rotate. */
 export const TON_WALLET_TG_TRAMPOLINE_CODE_HASH = '9149ae51c1e4689710cebf7830297b16acfbadb363a920a537893e7ffeeca768';
 
-const DEFAULT_MAX_AGE_SECONDS = 600;
-/** How far ahead of `now` a wallet's clock may run. */
-const CLOCK_SKEW_SECONDS = 60;
 const MAX_PUBLIC_KEY = (1n << 256n) - 1n;
 
 /** A TonConnect `ton_proof` sign-in, as the dashboard receives it from the wallet. */
@@ -83,11 +80,7 @@ export async function verifyTonProof(
   opts: TonProofOptions,
   provider: () => TonProvider,
 ): Promise<TonProofResult> {
-  const now = Math.floor((opts.now ?? new Date()).getTime() / 1000);
-  const maxAge = opts.maxAgeSeconds ?? DEFAULT_MAX_AGE_SECONDS;
-  if (!Number.isFinite(now) || !Number.isFinite(maxAge) || maxAge <= 0) {
-    throw new ChainError(ChainErrorKinds.InvalidArgument, 'verifyTonProof needs a valid `now` and a positive `maxAgeSeconds`');
-  }
+  const window = tonConnectWindow(opts.now, opts.maxAgeSeconds, 'verifyTonProof');
 
   const { proof } = input;
   if (String(input.network) !== TON_CONNECT_MAINNET) return fail('network');
@@ -96,11 +89,8 @@ export async function verifyTonProof(
     return fail('domain');
   }
 
-  const timestamp = timestampOf(proof.timestamp);
-  // Written to pass only when both bounds hold, so nothing unusable can slip through.
-  if (timestamp === null || !(now - timestamp <= maxAge && timestamp <= now + CLOCK_SKEW_SECONDS)) {
-    return fail('expired');
-  }
+  const timestamp = tonConnectTimestamp(proof.timestamp, window);
+  if (timestamp === null) return fail('expired');
 
   // TonConnect caps what a dapp may request; what was signed is bound by being the issued payload.
   if (proof.payload !== opts.expectedPayload) return fail('payload');
@@ -112,7 +102,7 @@ export async function verifyTonProof(
   if (!key.ok) return key;
   if (input.publicKey !== undefined && input.publicKey.toLowerCase() !== key.publicKey.toString('hex')) return fail('public_key');
 
-  const signature = base64Bytes(proof.signature);
+  const signature = tonConnectBase64(proof.signature);
   if (signature === null || signature.length !== 64) return fail('signature');
   const digest = tonProofDigest(account.address, proof.domain.value, timestamp, proof.payload);
   if (!signVerify(digest, signature, key.publicKey)) return fail('signature');
@@ -209,17 +199,6 @@ let codeHashes: Map<string, TonWalletVersion> | null = null;
 function fixedKeyVersions(): Map<string, TonWalletVersion> {
   codeHashes ??= new Map(TON_WALLET_VERSIONS.map((version) => [tonWalletContract(Buffer.alloc(32), version).init.code.hash().toString('hex'), version]));
   return codeHashes;
-}
-
-function timestampOf(value: unknown): number | null {
-  const text = typeof value === 'number' ? String(value) : value;
-  if (typeof text !== 'string' || !/^\d{1,15}$/.test(text)) return null;
-  return Number(text);
-}
-
-function base64Bytes(value: unknown): Buffer | null {
-  if (typeof value !== 'string' || !/^[A-Za-z0-9+/_-]+={0,2}$/.test(value)) return null;
-  return Buffer.from(value.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
 }
 
 function fail(reason: TonProofFailure): { ok: false; reason: TonProofFailure } {

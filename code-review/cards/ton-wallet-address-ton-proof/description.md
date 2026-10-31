@@ -1,6 +1,6 @@
 ---
 id: RIN-XXX
-title: TON in omnichain — a wallet address from a public key, and a TonConnect ton_proof verifier (fixed-key wallets and Telegram Wallet)
+title: TON in omnichain — a wallet address from a public key, TonConnect ton_proof (fixed-key wallets and Telegram Wallet) and signData text verification
 status: draft
 repos: [omnichain]
 ---
@@ -15,6 +15,9 @@ tie a key to an address, and omnichain 0.7.1 cannot:
   solver sends its public key, and rango-intents must check that the key's
   wallet is the fill's sender. 0.7.1 builds a wallet address only from a seed
   (`TonWallet`, `ton_wallet.ts:140-150`).
+- **Affiliate claims** (`../intents/intents9…`): each claim is signed, and
+  wallet apps sign arbitrary text only through TonConnect `signData`, a format
+  of its own.
 - **Affiliate sign-in** (`../intents/intents9.ton-wallet-signin-and-affiliates.md`):
   affiliates sign in with TonConnect's `ton_proof` (decided 2026-10-27).
   Verifying it means checking the proof's `walletStateInit` against the
@@ -108,7 +111,23 @@ nonce?
     TonAPI's `/v2/blockchain/accounts/{id}/methods/get_public_key`, with the
     usual fallback (`ton_provider.ts:184-260`).
   - `verifyTonProof` is therefore `async`.
-- **R4. Exports** from `@getomnichain/omnichain/ton`; `docs/ton.md` documents
+- **R4. `verifyTonSignData(result, opts)`** (`ton_sign_data.ts`): a TonConnect
+  `signData` of a **text** payload, as the wallet returns it (`signature`
+  base64, `address` raw, `timestamp`, `domain`, `payload { type: 'text',
+  text }`), checked against `publicKey` (the caller's: rango-intents saves the
+  key its `ton_proof` sign-in gave), `expectedAddress`, `expectedDomain`,
+  `expectedText`, `maxAgeSeconds` (600) and `now`.
+  - The signed digest is `sha256(0xffff ‖ "ton-connect/sign-data/" ‖ workchain
+    (int32 BE) ‖ account hash ‖ domain length (uint32 BE) ‖ domain ‖
+    timestamp (uint64 BE) ‖ "txt" ‖ text length (uint32 BE) ‖ text)`
+    (TonConnect `spec/rpc.md`; big-endian throughout, unlike `ton_proof`).
+  - Result `{ ok: true }` or `{ ok: false, reason }` (`payload`, `address`,
+    `domain`, `expired`, `signature`); never throws on what the wallet sent;
+    an unusable key, `now` or `maxAgeSeconds` throws `InvalidArgument`.
+  - `TonWallet.signTonProof({ domain, payload })` and
+    `TonWallet.signTextData({ text, domain })` give what a wallet app would,
+    for scripts that sign in and claim without one.
+- **R5. Exports** from `@getomnichain/omnichain/ton`; `docs/ton.md` documents
   both; a patch release (0.7.2).
 
 ---
@@ -132,7 +151,12 @@ nonce?
 - **AC4 (R3)** A recorded Telegram Wallet proof verifies with the getter's
   key (provider stubbed), even when its `stateInit` holds another key; a
   getter failure gives `provider`.
-- **AC5** Every existing TON spec passes; `npm run build` emits both entry
+- **AC5 (R4)** `signData` text results signed by the reference
+  implementation (`mois-ilya/ton-sign-data-reference`, MIT) verify. Another
+  text, address, domain or key, an old timestamp and a flipped signature byte
+  each give their reason. `TonWallet.signTonProof` / `signTextData` results
+  verify for every wallet version.
+- **AC6** Every existing TON spec passes; `npm run build` emits both entry
   points.
 
 ---
