@@ -106,6 +106,15 @@ describe('ton_proof refusals, each with its reason and none thrown', () => {
     await expect(verify(proofInput, overrides)).resolves.toEqual({ ok: false, reason });
   });
 
+  it.each<[string, Partial<TonProofOptions>]>([
+    ['an invalid now', { now: new Date('garbage') }],
+    ['a NaN maxAgeSeconds', { maxAgeSeconds: Number.NaN }],
+    ['an infinite maxAgeSeconds', { maxAgeSeconds: Number.POSITIVE_INFINITY }],
+    ['a zero maxAgeSeconds', { maxAgeSeconds: 0 }],
+  ])('throws for %s rather than leave the age unchecked', async (_label, overrides) => {
+    await expect(verify(input, overrides)).rejects.toMatchObject({ kind: ChainErrorKinds.InvalidArgument });
+  });
+
   it('accepts a decimal-string timestamp and a few seconds of wallet clock ahead', async () => {
     await expect(verify(withProof({ timestamp: String(ts) }), { now: new Date((ts - 30) * 1000) })).resolves.toMatchObject({ ok: true });
   });

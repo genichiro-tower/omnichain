@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { Cell, type StateInit, contractAddress, loadStateInit } from '@ton/core';
 import { signVerify } from '@ton/crypto';
 
+import { ChainError, ChainErrorKinds } from '../errors.ts';
 import { TonAddress } from './ton_address.ts';
 import type { TonWalletVersion } from './ton_messages.ts';
 import { type TonProvider, TonProviderError } from './ton_provider.ts';
@@ -73,7 +74,7 @@ export type TonProofResult =
  * domain, the age and the payload; the StateInit is the account's; the key is
  * read from a known wallet's StateInit, or for Telegram Wallet from its live
  * account; and the signature is that key's. Never throws on what the wallet
- * sent.
+ * sent; throws `InvalidArgument` for options that would leave the age unchecked.
  *
  * `provider` is only called for Telegram Wallet.
  */
@@ -82,6 +83,12 @@ export async function verifyTonProof(
   opts: TonProofOptions,
   provider: () => TonProvider,
 ): Promise<TonProofResult> {
+  const now = Math.floor((opts.now ?? new Date()).getTime() / 1000);
+  const maxAge = opts.maxAgeSeconds ?? DEFAULT_MAX_AGE_SECONDS;
+  if (!Number.isFinite(now) || !Number.isFinite(maxAge) || maxAge <= 0) {
+    throw new ChainError(ChainErrorKinds.InvalidArgument, 'verifyTonProof needs a valid `now` and a positive `maxAgeSeconds`');
+  }
+
   const { proof } = input;
   if (String(input.network) !== TON_CONNECT_MAINNET) return fail('network');
 
@@ -90,8 +97,8 @@ export async function verifyTonProof(
   }
 
   const timestamp = timestampOf(proof.timestamp);
-  const now = Math.floor((opts.now ?? new Date()).getTime() / 1000);
-  if (timestamp === null || timestamp > now + CLOCK_SKEW_SECONDS || now - timestamp > (opts.maxAgeSeconds ?? DEFAULT_MAX_AGE_SECONDS)) {
+  // Written to pass only when both bounds hold, so nothing unusable can slip through.
+  if (timestamp === null || !(now - timestamp <= maxAge && timestamp <= now + CLOCK_SKEW_SECONDS)) {
     return fail('expired');
   }
 
