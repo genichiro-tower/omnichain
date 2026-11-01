@@ -44,6 +44,7 @@ import {
   type TonAccountTransaction,
   assertTonTxHash,
 } from './ton_provider.ts';
+import { type TonProofInput, type TonProofOptions, type TonProofResult, verifyTonProof } from './ton_proof.ts';
 import { ToncenterProvider } from './ton_toncenter.ts';
 import { TonapiProvider } from './ton_tonapi.ts';
 import { type TonTraceSummary, TonTransactionStatus, summarizeTonTrace, tonJettonCreditsOf } from './ton_transaction_status.ts';
@@ -604,6 +605,14 @@ export class TonChain extends Chain {
       { chainId: this.chainId },
     );
   }
+  /**
+   * Verifies a TonConnect `ton_proof` sign-in ({@link verifyTonProof}). The
+   * chain is read only for Telegram Wallet, whose key is the live one.
+   */
+  verifyTonProof(input: TonProofInput, opts: TonProofOptions): Promise<TonProofResult> {
+    return verifyTonProof(input, opts, () => this.provider);
+  }
+
 
   private async statusOf(hash: string, opts: TonGetTransactionStatusOpts): Promise<TonTransactionStatus> {
     this.assertTxHash(hash);

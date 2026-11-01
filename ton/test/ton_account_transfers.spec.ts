@@ -159,6 +159,7 @@ function fakeProvider(overrides: Partial<TonProvider> = {}): TonProvider {
     name: 'fake',
     getAccountState: async (): Promise<TonAccountState> => ({ status: 'active', balance: 5n, codeHash: 'h' }),
     getSeqno: async () => 3,
+    getPublicKey: async () => 0n,
     getJettonWalletAddress: async () => JETTON_WALLET,
     getJettonBalance: async () => 0n,
     sendBoc: async () => {},

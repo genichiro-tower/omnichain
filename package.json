@@ -1,6 +1,6 @@
 {
   "name": "@getomnichain/omnichain",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Multi-chain SDK for EVM, Solana, UTXO (BTC/LTC/DOGE/DASH/ZEC/BCH), Stellar, Tron, and TON. TypeScript parity port of omnichain-py.",
   "keywords": [
     "omnichain",

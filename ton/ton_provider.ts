@@ -89,6 +89,11 @@ export interface TonProvider {
    * cannot be read; never reads a failure as 0.
    */
   getSeqno(address: string): Promise<number>;
+  /**
+   * The `get_public_key` getter's answer. An account without the getter, or
+   * whose getter fails, is a definite error; a failed read is a retryable one.
+   */
+  getPublicKey(address: string): Promise<bigint>;
   getJettonWalletAddress(jettonMaster: string, owner: string): Promise<string>;
   /** 0 for a jetton wallet that is not deployed. */
   getJettonBalance(jettonWallet: string): Promise<bigint>;
@@ -187,6 +192,10 @@ export class TonFallbackProvider implements TonProvider {
 
   getSeqno(address: string): Promise<number> {
     return this.call('getSeqno', (p) => p.getSeqno(address));
+  }
+
+  getPublicKey(address: string): Promise<bigint> {
+    return this.call('getPublicKey', (p) => p.getPublicKey(address));
   }
 
   getJettonWalletAddress(jettonMaster: string, owner: string): Promise<string> {

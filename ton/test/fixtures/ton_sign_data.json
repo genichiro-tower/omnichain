@@ -1,0 +1,26 @@
+{
+ "source": "Signed with the text hash of github.com/mois-ilya/ton-sign-data-reference (MIT) and its test mnemonic",
+ "publicKey": "f65f38b823e86d7f1804ed54a406a8d2c2e32191d3be4ae2d1ac45cdcd73f47a",
+ "vectors": [
+  {
+   "signature": "G4JGyxWa1JirGDxviygrefWwjlXHAFTwd9iCyas5pw2T1Vg6jpR8bn/3wMOQrib+M9BidMbsru8pfMrp6zqLAQ==",
+   "address": "0:b2a93997269b2116ed465b5b724d7ea969addcfb7ece1bdb37baff19cd7ffd18",
+   "timestamp": 1764424200,
+   "domain": "example.com",
+   "payload": {
+    "type": "text",
+    "text": "Hello, TON!"
+   }
+  },
+  {
+   "signature": "GOOhWylR/OXPDNYfdWNAwBIBxMKwcmZV6eDfJC6NTL2/3oM3dVXRAosV/6cZWOHGDmOgfVYaUHOIyMDx0Nc0BA==",
+   "address": "0:b2a93997269b2116ed465b5b724d7ea969addcfb7ece1bdb37baff19cd7ffd18",
+   "timestamp": 1764424321,
+   "domain": "example.com",
+   "payload": {
+    "type": "text",
+    "text": "Claim 500000 of 0:b113…1dfe on -4000\nnonce: 7"
+   }
+  }
+ ]
+}

@@ -550,3 +550,32 @@ describe('account reads', () => {
     expect((tonapi.mock.calls[0][1] as RequestInit).headers).toMatchObject({ authorization: 'Bearer key' });
   });
 });
+
+describe('a wallet public key from its get_public_key', () => {
+  const WALLET = '0:420b9825072820d744b071765d6384ac77a36008d726d2a64bad0695c38b0fb1';
+  const KEY = 0xf2b2c667bb869d7d4215d489c7b0a49e6dae22034c55395c579b98ab0b716fdcn;
+
+  it('reads the key both providers answer, as recorded on mainnet', async () => {
+    stubFetch(() => ({ status: 200, body: { gas_used: 921, exit_code: 0, stack: [{ type: 'num', value: `0x${KEY.toString(16)}` }] } }));
+    await expect(new ToncenterProvider(ENDPOINT).getPublicKey(WALLET)).resolves.toBe(KEY);
+    stubFetch(() => ({ status: 200, body: { success: true, exit_code: 0, stack: [{ type: 'num', num: `0x${KEY.toString(16)}` }] } }));
+    await expect(new TonapiProvider(ENDPOINT).getPublicKey(WALLET)).resolves.toBe(KEY);
+  });
+
+  it("answers definitely for an account that has no such getter (a jetton master's exit code 11)", async () => {
+    stubFetch(() => ({ status: 200, body: { gas_used: 470, exit_code: 11, stack: [{ type: 'num', value: '0x1339c' }] } }));
+    await expect(new ToncenterProvider(ENDPOINT).getPublicKey(WALLET)).rejects.toMatchObject({ retryable: false });
+    stubFetch(() => ({ status: 200, body: { success: false, exit_code: 11, stack: [{ type: 'num', num: '0x1339c' }] } }));
+    await expect(new TonapiProvider(ENDPOINT).getPublicKey(WALLET)).rejects.toMatchObject({ retryable: false });
+    stubFetch(() => ({ status: 404, body: { error: 'entity not found' } }));
+    await expect(new TonapiProvider(ENDPOINT).getPublicKey(WALLET)).rejects.toMatchObject({ retryable: false });
+  });
+
+  it('refuses retryably a read that failed', async () => {
+    stubFetch(() => ({ status: 200, body: { error: 'cannot run get method', exit_code: 0 } }));
+    await expect(new ToncenterProvider(ENDPOINT).getPublicKey(WALLET)).rejects.toMatchObject({ retryable: true });
+    stubFetch(() => ({ status: 503, body: 'unavailable' }));
+    await expect(new ToncenterProvider(ENDPOINT).getPublicKey(WALLET)).rejects.toMatchObject({ retryable: true });
+    await expect(new TonapiProvider(ENDPOINT).getPublicKey(WALLET)).rejects.toMatchObject({ retryable: true });
+  });
+});

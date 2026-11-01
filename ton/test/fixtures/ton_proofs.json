@@ -1,0 +1,48 @@
+{
+ "source": "TonProof.NET test data (MIT), github.com/WinoGarcia/TonProof.NET, TonProof.Tests/Data",
+ "v4r2_mainnet": {
+  "address": "0:0522952c6d0846ad7f93dfb7987e5f77f02ee53290a26f9be85a50c689085932",
+  "network": "-239",
+  "publicKey": "e635249f6b3fbaf9742ae1d09d8f6f01b6082ff9256d719006329405019f3198",
+  "proof": {
+   "timestamp": 1721827476,
+   "domain": {
+    "lengthBytes": 20,
+    "value": "winogarcia.github.io"
+   },
+   "signature": "z05SXc3qseQ/c/Fwmp+D4+qF2QWRAbP7E8mcYwbxBTqsEcG/DQdMdUUJhYx0NQTpid38oxBDYnJ9vB0cZkd/Bw==",
+   "payload": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1bmlxdWVfbmFtZSI6IjExMjM3N2UxLWUwYjktNGIyOC05NjJkLTRiZDAxMTFmZmY3NyIsIm5iZiI6MTcyMTgyNzA4MiwiZXhwIjoxNzIxODI3OTgyLCJpYXQiOjE3MjE4MjcwODIsImlzcyI6Iklzc3VlckZvclBheWxvYWQiLCJhdWQiOiJBdWRpZW5jZUZvclBheWxvYWQifQ.BZ6LvTKvsSPZ4H6nbwcQP3gjVgvkbYm2vPIQjJ4Gyak",
+   "stateInit": "te6cckECFgEAAwQAAgE0AgEAUQAAAAApqaMX5jUkn2s/uvl0KuHQnY9vAbYIL/klbXGQBjKUBQGfMZhAART/APSkE/S88sgLAwIBIAkEBPjygwjXGCDTH9Mf0x8C+CO78mTtRNDTH9Mf0//0BNFRQ7ryoVFRuvKiBfkBVBBk+RDyo/gAJKTIyx9SQMsfUjDL/1IQ9ADJ7VT4DwHTByHAAJ9sUZMg10qW0wfUAvsA6DDgIcAB4wAhwALjAAHAA5Ew4w0DpMjLHxLLH8v/CAcGBQAK9ADJ7VQAbIEBCNcY+gDTPzBSJIEBCPRZ8qeCEGRzdHJwdIAYyMsFywJQBc8WUAP6AhPLassfEss/yXP7AABwgQEI1xj6ANM/yFQgR4EBCPRR8qeCEG5vdGVwdIAYyMsFywJQBs8WUAT6AhTLahLLH8s/yXP7AAIAbtIH+gDU1CL5AAXIygcVy//J0Hd0gBjIywXLAiLPFlAF+gIUy2sSzMzJc/sAyEAUgQEI9FHypwICAUgTCgIBIAwLAFm9JCtvaiaECAoGuQ+gIYRw1AgIR6STfSmRDOaQPp/5g3gSgBt4EBSJhxWfMYQCASAODQARuMl+1E0NcLH4AgFYEg8CASAREAAZrx32omhAEGuQ64WPwAAZrc52omhAIGuQ64X/wAA9sp37UTQgQFA1yH0BDACyMoHy//J0AGBAQj0Cm+hMYALm0AHQ0wMhcbCSXwTgItdJwSCSXwTgAtMfIYIQcGx1Z70ighBkc3RyvbCSXwXgA/pAMCD6RAHIygfL/8nQ7UTQgQFA1yH0BDBcgQEI9ApvoTGzkl8H4AXTP8glghBwbHVnupI4MOMNA4IQZHN0crqSXwbjDRUUAIpQBIEBCPRZMO1E0IEBQNcgyAHPFvQAye1UAXKwjiOCEGRzdHKDHrFwgBhQBcsFUAPPFiP6AhPLassfyz/JgED7AJJfA+IAeAH6APQEMPgnbyIwUAqhIb7y4FCCEHBsdWeDHrFwgBhQBMsFJs8WWPoCGfQAy2kXyx9SYMs/IMmAQPsABru64+A="
+  }
+ },
+ "v3r1_mainnet": {
+  "address": "0:c83546fdc5fac87d55f04804919c0829bc0e6be24b8e564590dbc44380c30ee9",
+  "network": "-239",
+  "publicKey": "e635249f6b3fbaf9742ae1d09d8f6f01b6082ff9256d719006329405019f3198",
+  "proof": {
+   "timestamp": 1721827131,
+   "domain": {
+    "lengthBytes": 20,
+    "value": "winogarcia.github.io"
+   },
+   "signature": "LVQzfrfwz8I5ZCl7WFpGdICvYbHxPplZnMKx0gT/X0jFlDOohPa9/6RtzvcSGWqtHBwE6XlUUadmcZoTMlyUAw==",
+   "payload": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1bmlxdWVfbmFtZSI6IjExMjM3N2UxLWUwYjktNGIyOC05NjJkLTRiZDAxMTFmZmY3NyIsIm5iZiI6MTcyMTgyNzA4MiwiZXhwIjoxNzIxODI3OTgyLCJpYXQiOjE3MjE4MjcwODIsImlzcyI6Iklzc3VlckZvclBheWxvYWQiLCJhdWQiOiJBdWRpZW5jZUZvclBheWxvYWQifQ.BZ6LvTKvsSPZ4H6nbwcQP3gjVgvkbYm2vPIQjJ4Gyak",
+   "stateInit": "te6cckEBAwEAkQACATQCAQBQAAAAACmpoxfmNSSfaz+6+XQq4dCdj28Btggv+SVtcZAGMpQFAZ8xmADA/wAg3SCCAUyXupcw7UTQ1wsf4KTyYIMI1xgg0x/TH9Mf+CMTu/Jj7UTQ0x/TH9P/0VEyuvKhUUS68qIE+QFUEFX5EPKj+ACTINdKltMH1AL7AOjRAaTIyx/LH8v/ye1UGy3yHQ=="
+  }
+ },
+ "w5beta_testnet": {
+  "address": "0:7afd7563d8fd084d35060278320769743905983b8ea43c5b16fb6e3dc0a190dd",
+  "network": "-3",
+  "publicKey": "c5134fcb39879c2cf81ffdc347353d031cf184538130fdd42688152088bf69ba",
+  "proof": {
+   "timestamp": 1721812530,
+   "domain": {
+    "lengthBytes": 20,
+    "value": "winogarcia.github.io"
+   },
+   "signature": "8ab+IBU83nga6aNznUNEHr3OgN1L7I2raVomWNrhEElTFI1a3VvAz4mzvQbaYiaCY+WftHZrJnSiEgnbRYojDA==",
+   "payload": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1bmlxdWVfbmFtZSI6IjQxNDA1NzUxLTNlZjEtNDZhYi04ZDJiLTRkMjE4NWVhZjI2ZSIsIm5iZiI6MTcyMTgxMjQ4OCwiZXhwIjoxNzIxODEzMzg4LCJpYXQiOjE3MjE4MTI0ODgsImlzcyI6Iklzc3VlckZvclBheWxvYWQiLCJhdWQiOiJBdWRpZW5jZUZvclBheWxvYWQifQ.rzJ1tpq-jDp19pDwWO8ZNp8T9ZkME9CZXIppWc5FYGo",
+   "stateInit": "te6cckEBAwEAWQACATQCAQBdAAAAAH////6AAAAAAABiiaflnMPOFnwP/uGjmp6BjnjCKcCYfuoTRAqQRF+03SAIQgLkzzsvTG1qYeoPK1RH0mZ4WyavNjfbLe7mvNGqgm80EpjwGJs="
+  }
+ }
+}

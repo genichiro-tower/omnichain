@@ -8,7 +8,8 @@ import { TonChain } from '../ton_chain.ts';
 import { tonRelayMessage, tonWalletRequestFields } from '../ton_messages.ts';
 import { type TonAccountState, TonBroadcastUncertainError, type TonProvider, tonBroadcastReply, TonProviderError } from '../ton_provider.ts';
 import { TonSignedTransaction, TonUnsignedTransaction } from '../ton_transactions.ts';
-import { TON_LEGACY_DEFAULT_WALLET_ID, TON_LEGACY_MAX_MESSAGES, TonWallet, deriveTonNativeSeed } from '../ton_wallet.ts';
+import { TON_LEGACY_MAX_MESSAGES, TonWallet, deriveTonNativeSeed } from '../ton_wallet.ts';
+import { TON_LEGACY_DEFAULT_WALLET_ID } from '../ton_wallet_contracts.ts';
 import { MNEMONIC, OTHER, usdtJettonContent } from './ton_test_helpers.ts';
 
 const keyPair = keyPairFromSeed(deriveTonNativeSeed(MNEMONIC));

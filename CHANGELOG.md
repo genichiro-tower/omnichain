@@ -8,6 +8,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.2] — 2026-10-31
+
+TON: a key's wallet address, TonConnect `ton_proof` sign-in and `signData` text signatures. Additive.
+
+### Added
+
+- **`tonWalletAddress(publicKey, version, { workchain })`** and **`tonWalletAddresses(publicKey)`**: the raw address of a public key's wallet, built as `TonWallet` builds its contract (`TonWallet` now uses the same `tonWalletContract`). For callers that hold a key but no seed, such as a fill proof's signer.
+- **`TonChain.verifyTonProof(input, opts)`** (and `verifyTonProof`, `tonProofDigest`): verifies a TonConnect `ton_proof` by TonConnect's rules — network, domain, age, payload, the StateInit's address, the key from a fixed-key wallet's StateInit (`v3r2`, `v4r2`, `v5r1`) or Telegram Wallet's live key, and the signature. Returns `{ ok: true, publicKey, version }` or `{ ok: false, reason }`; never throws on what the wallet sent; reads the chain only for Telegram Wallet.
+- **`verifyTonSignData(result, opts)`** (and `tonSignDataTextDigest`): verifies a TonConnect `signData` of a text payload against the signer's key, with the expected address, domain, text and age. Returns `{ ok: true }` or `{ ok: false, reason }`; never throws on what the wallet sent.
+- **`TonWallet.signTonProof({ domain, payload })`** and **`TonWallet.signTextData({ text, domain })`**: the `ton_proof` and `signData` results a wallet app would give, for signing in and signing text from a script.
+- **`getPublicKey(address)`** on `TonProvider` (TON Center `runGetMethod`, TonAPI's get-method, with fallback): an account's `get_public_key`; a missing getter is a definite answer, a failed read a retryable one.
+
+### Changed
+
+- `TON_WALLET_VERSIONS`, `TON_LEGACY_DEFAULT_WALLET_ID` and `TonWorkchain` move to `ton_wallet_contracts.ts`; they are exported from `@getomnichain/omnichain/ton` as before.
+
 ## [0.7.1] — 2026-10-25
 
 TON: an account's transfers from a transaction hash, with finality — what a deposit watcher (clydner, via TonAPI webhooks) needs. Additive.

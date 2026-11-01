@@ -1,6 +1,6 @@
 import { createHmac, pbkdf2Sync } from 'node:crypto';
 
-import { type Cell, SendMode, type StateInit, beginCell, external, storeMessage, storeMessageRelaxed } from '@ton/core';
+import { type Cell, SendMode, type StateInit, beginCell, external, storeMessage, storeMessageRelaxed, storeStateInit } from '@ton/core';
 import { keyPairFromSeed, sign } from '@ton/crypto';
 import { WalletContractV3R2, WalletContractV4, WalletContractV5R1 } from '@ton/ton';
 
@@ -22,7 +22,10 @@ import {
   tonNormalizedExternalHash,
   tonOutActions,
 } from './ton_messages.ts';
+import { type TonProofInput, tonProofDigest } from './ton_proof.ts';
+import { type TonSignDataTextResult, tonSignDataTextDigest } from './ton_sign_data.ts';
 import { TonSignedTransaction, TonUnsignedTransaction } from './ton_transactions.ts';
+import { type TonWalletContract, type TonWorkchain, tonWalletContract } from './ton_wallet_contracts.ts';
 
 const TON_COIN_TYPE = 607;
 const TON_DERIVATION_PATH_REGEX = /^m\/44'\/607'\/(\d+)'$/;
@@ -55,11 +58,6 @@ export function deriveTonEd25519Seed(bip39Seed: Uint8Array, index: number): Buff
   return deriveSlip10Ed25519Seed(bip39Seed, [44, TON_COIN_TYPE, index]);
 }
 
-export const TON_WALLET_VERSIONS: readonly TonWalletVersion[] = ['v3r2', 'v4r2', 'v5r1'];
-/** The workchains a wallet can live on: the basechain (0) and the masterchain (-1). */
-export type TonWorkchain = 0 | -1;
-/** The v3r2 / v4r2 wallet id the Python SDK uses on both workchains. */
-export const TON_LEGACY_DEFAULT_WALLET_ID = 698983191;
 /** v3r2 / v4r2 send at most four messages per request. */
 export const TON_LEGACY_MAX_MESSAGES = 4;
 
@@ -114,7 +112,7 @@ export class TonWallet extends AbstractBip32StyleSingleAccountWallet {
   readonly version: TonWalletVersion;
   /** 0 (the basechain, the default) or -1 (the masterchain, where gas and storage cost far more). */
   readonly workchain: TonWorkchain;
-  readonly contract: WalletContractV5R1 | WalletContractV4 | WalletContractV3R2;
+  readonly contract: TonWalletContract;
   readonly #secretKey: Buffer;
   private readonly _address: string;
 
@@ -124,29 +122,13 @@ export class TonWallet extends AbstractBip32StyleSingleAccountWallet {
       throw new ChainError(ChainErrorKinds.InvalidArgument, `A TON ed25519 seed is 32 bytes, got ${ed25519Seed.length}`);
     }
     const version = opts.version ?? 'v5r1';
-    if (!TON_WALLET_VERSIONS.includes(version)) {
-      throw new ChainError(ChainErrorKinds.InvalidArgument, `TON wallet version must be one of ${TON_WALLET_VERSIONS.join(', ')}, got ${String(version)}`);
-    }
     const workchain = opts.workchain ?? 0;
-    if (workchain !== 0 && workchain !== -1) {
-      throw new ChainError(ChainErrorKinds.InvalidArgument, `A TON wallet lives on workchain 0 or -1, got ${String(workchain)}`);
-    }
     const keyPair = keyPairFromSeed(Buffer.from(ed25519Seed));
+    this.contract = tonWalletContract(keyPair.publicKey, version, workchain);
     this.publicKey = keyPair.publicKey;
     this.#secretKey = keyPair.secretKey;
     this.version = version;
     this.workchain = workchain;
-    // The wallet ids the Python SDK (ton_core) uses on either workchain: W5's
-    // context names workchain 0 (as @ton/ton's default does), and v3r2 /
-    // v4r2's is 698983191 whatever the wallet's workchain — where @ton/ton
-    // would add the workchain, giving another address on -1.
-    const publicKey = keyPair.publicKey;
-    this.contract =
-      version === 'v5r1'
-        ? WalletContractV5R1.create({ workchain, publicKey })
-        : version === 'v4r2'
-          ? WalletContractV4.create({ workchain, publicKey, walletId: TON_LEGACY_DEFAULT_WALLET_ID })
-          : WalletContractV3R2.create({ workchain, publicKey, walletId: TON_LEGACY_DEFAULT_WALLET_ID });
     this._address = this.contract.address.toRawString();
   }
 
@@ -321,6 +303,40 @@ export class TonWallet extends AbstractBip32StyleSingleAccountWallet {
   /** An ed25519 signature over {@link tonMessageHash}, hex; never over the message's bytes, which could pass for a request hash. */
   signMessage(message: string): TonSignedMessage {
     return new TonSignedMessage(sign(tonMessageHash(message), this.#secretKey).toString('hex'));
+  }
+
+  /**
+   * A TonConnect `ton_proof` of this wallet, as a wallet app would give it:
+   * for signing in where a wallet app is not at hand (`TonChain.verifyTonProof`).
+   */
+  signTonProof(args: { domain: string; payload: string; timestamp?: number }): TonProofInput {
+    const timestamp = args.timestamp ?? Math.floor(Date.now() / 1000);
+    const address = new TonAddress(this._address);
+    return {
+      address: this._address,
+      network: '-239',
+      publicKey: this.publicKey.toString('hex'),
+      proof: {
+        timestamp,
+        domain: { lengthBytes: Buffer.byteLength(args.domain, 'utf8'), value: args.domain },
+        payload: args.payload,
+        signature: sign(tonProofDigest(address, args.domain, timestamp, args.payload), this.#secretKey).toString('base64'),
+        stateInit: beginCell().store(storeStateInit(this.stateInit)).endCell().toBoc().toString('base64'),
+      },
+    };
+  }
+
+  /** A TonConnect `signData` of `text`, as a wallet app would give it (`verifyTonSignData`). */
+  signTextData(args: { text: string; domain: string; timestamp?: number }): TonSignDataTextResult {
+    const timestamp = args.timestamp ?? Math.floor(Date.now() / 1000);
+    const digest = tonSignDataTextDigest(new TonAddress(this._address), args.domain, timestamp, args.text);
+    return {
+      signature: sign(digest, this.#secretKey).toString('base64'),
+      address: this._address,
+      timestamp,
+      domain: args.domain,
+      payload: { type: 'text', text: args.text },
+    };
   }
 
   verifySignature(message: string, signedMessage: AbstractSignedMessage): boolean {

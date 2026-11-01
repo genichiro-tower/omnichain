@@ -87,7 +87,44 @@ Two derivations, chosen by whether a path is given:
 - `createInternalRequest({ seqno, messages, validUntil })` is a request for a relayer (op `0x73696e74`). Send modes are kept as given, so without +2 its messages leave together or not at all.
 - `signTransaction(transaction, chain)` reads the seqno and whether the wallet is deployed, and signs a `TonUnsignedTransaction` as an external request.
 - `signMessage` / `verifySignature` sign `tonMessageHash(message)` = SHA-256(`"TON Signed Message:\n"` + the message's UTF-8 bytes) with ed25519, the shape of Stellar's SEP-53. Never the message's own bytes: the same key signs W5 requests over a 32-byte cell hash, so a crafted 32-byte message would otherwise yield a signature that authorizes a transfer. Standard TON wallets (TonConnect `signData`) do not produce this format.
-- `TonChain.verifySignature(publicKey, message, signature)` checks one with the public key only (32 bytes, or 64 hex characters), as `TronChain` / `StellarChain` do; `TonWallet.verifySignature` uses it. The signature must be exactly 128 hex characters (anything else, trailing characters included, is `false`) and a `TonSignedMessage`. `TonChain.verifyMessageSignature` throws: a TON address does not reveal its key — the signer's W5 address is `WalletContractV5R1.create({ publicKey, workchain: 0 }).address`.
+- `TonChain.verifySignature(publicKey, message, signature)` checks one with the public key only (32 bytes, or 64 hex characters), as `TronChain` / `StellarChain` do; `TonWallet.verifySignature` uses it. The signature must be exactly 128 hex characters (anything else, trailing characters included, is `false`) and a `TonSignedMessage`. `TonChain.verifyMessageSignature` throws: a TON address does not reveal its key — the key's wallet address is `tonWalletAddress(publicKey, version)`.
+- `tonWalletAddress(publicKey, version, { workchain })` is the raw address of a key's wallet, built as `TonWallet` builds its contract (`TonWallet` uses it); `tonWalletAddresses(publicKey)` gives one per version. The key is 32 bytes or 64 hex characters.
+
+## Sign-in: TonConnect `ton_proof`
+
+```ts
+const result = await TonMainnet.verifyTonProof(
+  { address, network, proof, publicKey }, // as TonConnect returns them: account.address, account.chain, the ton_proof item, account.publicKey
+  { expectedDomain: 'dashboard.example', expectedPayload: nonce }, // maxAgeSeconds (600), now
+);
+// { ok: true, publicKey, version } | { ok: false, reason }
+```
+
+`verifyTonProof` checks, in order, by TonConnect's rules:
+
+1. the network is mainnet (`-239`) — the signature does not cover it;
+2. the domain is `expectedDomain`, and `lengthBytes` its UTF-8 length;
+3. the timestamp (a number or a decimal string) is at most `maxAgeSeconds` old, and at most 60 s ahead (a wallet's clock may run ahead);
+4. the payload is `expectedPayload`;
+5. the StateInit is the account's: its address on the account's workchain is the account;
+6. the key: a fixed-key wallet (`v3r2`, `v4r2`, `v5r1`, by code hash) gives it from its StateInit data. Telegram Wallet's in-app wallet (its trampoline, `TON_WALLET_TG_TRAMPOLINE_CODE_HASH`) can rotate its key, so the live account must be `active` and run the trampoline, and its `get_public_key` names the key, read afresh for every proof. A reported `publicKey` must be that key;
+7. ed25519 over `sha256(0xffff ‖ "ton-connect" ‖ sha256(message))` (`tonProofDigest`), `message` being `"ton-proof-item-v2/"` ‖ workchain (int32 BE) ‖ account hash ‖ domain length (uint32 LE) ‖ domain ‖ timestamp (uint64 LE) ‖ payload.
+
+Reasons: `network`, `domain`, `expired`, `payload`, `address`, `unsupported_wallet` (another contract, W5 beta and v3r1 among them, or a Telegram Wallet account that is not running the trampoline), `public_key`, `signature`, and `provider` — the chain could not be read, so the same proof may verify on a retry. It never throws on what the wallet sent; an invalid `now` or a `maxAgeSeconds` that is not a positive finite number throws `InvalidArgument`, as it would leave the age unchecked. Only Telegram Wallet reads the chain (`getAccountState`, `getPublicKey`), so a chain without provider keys verifies every other wallet. TonConnect's 128-byte caps on the domain and payload bound what a dapp may request, not what was signed: the payload is bound by being the issued one.
+
+## Signing text: TonConnect `signData`
+
+```ts
+const result = verifyTonSignData(signDataResult, { // the signData result as the wallet returns it
+  publicKey,                  // the signer's key: e.g. from its ton_proof sign-in
+  expectedAddress, expectedDomain, expectedText, // maxAgeSeconds (600), now
+});
+// { ok: true } | { ok: false, reason: 'payload' | 'address' | 'domain' | 'expired' | 'signature' }
+```
+
+Text payloads only. The wallet signs ed25519 over `sha256(0xffff ‖ "ton-connect/sign-data/" ‖ workchain (int32 BE) ‖ account hash ‖ domain length (uint32 BE) ‖ domain ‖ timestamp (uint64 BE) ‖ "txt" ‖ text length (uint32 BE) ‖ text)` (`tonSignDataTextDigest`) — big-endian throughout, unlike `ton_proof`. A TON address does not reveal its key, so the caller supplies it. Never throws on what the wallet sent; an unusable key, `now` or `maxAgeSeconds` throws `InvalidArgument`. Not every wallet app offers `signData`.
+
+Without a wallet app, a `TonWallet` gives both results a wallet app would: `signTonProof({ domain, payload })` for sign-in, `signTextData({ text, domain })` for text — each with an optional `timestamp`.
 
 ## Messages and relaying
 
@@ -184,4 +221,4 @@ result?.settled;                     // the trace is complete and all final: not
 
 ## Not covered
 
-Testnet, wallet versions other than v3r2 / v4r2 / v5r1, W5 extensions, jetton mints and burns in balance changes, and off-chain metadata outside https.
+Testnet, wallet versions other than v3r2 / v4r2 / v5r1 (and Telegram Wallet's trampoline for `ton_proof`), W5 extensions, jetton mints and burns in balance changes, and off-chain metadata outside https.
