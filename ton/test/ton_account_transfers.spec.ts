@@ -361,6 +361,25 @@ describe('native receipts net of what the receiving transaction sent out', () =>
     expect(await receiptOf([onward(30_000_000n), onward(30_000_000n)])).toEqual([]);
   });
 
+  it('reports the receipt as delivered when asked for gross, as before, for a proof that TON reached the account', async () => {
+    const [root, child] = (await realTrace()).transactions;
+    // A destination that forwards what it receives in the same transaction: it kept nothing, but it was paid.
+    const delivered: TonTraceMessage = { ...root.outMsgs[0], value: 1_000_000_000n };
+    const forwarded: TonTraceMessage = { ...delivered, source: child.account, destination: OTHER, value: 999_000_000n, createdLt: (delivered.createdLt as bigint) + 1n, body: null };
+    const trace: TonTrace = { complete: true, transactions: settled([{ ...root, outMsgs: [delivered] }, { ...child, inMsg: delivered, outMsgs: [forwarded] }]) };
+    const chain = chainWith(fakeProvider({ getTraceByTransaction: async () => trace }));
+    const receipts = async (receipts?: 'net' | 'gross') =>
+      flows(await chain.getAccountTransfers({ account: child.account, txHash: 'ab'.repeat(32), receipts }))?.filter((t) => t.direction === 'RECEIVE');
+    expect(await receipts('gross')).toEqual([{ direction: 'RECEIVE', kind: 'native', to: child.account, amount: 1_000_000_000n }]);
+    expect(await receipts('net')).toEqual([{ direction: 'RECEIVE', kind: 'native', to: child.account, amount: 1_000_000n }]);
+    expect(await receipts()).toEqual(await receipts('net'));
+
+    const refund = await refundTrace();
+    const vault = refund.transactions.find((tx) => tx.hash === REFUND_VAULT_TX) as TonTraceTransaction;
+    const relayed = await chainWith(fakeProvider({ getTraceByTransaction: async () => refund })).getAccountTransfers({ account: vault.account, txHash: REFUND_VAULT_TX, receipts: 'gross' });
+    expect(flows(relayed)?.find((t) => t.direction === 'RECEIVE')?.amount).toBe(12_098_212n);
+  });
+
   it("nets a jetton payout's attached TON against the relay, and leaves the jetton send as it is", async () => {
     const [root] = (await realTrace()).transactions;
     const vault = root.account;

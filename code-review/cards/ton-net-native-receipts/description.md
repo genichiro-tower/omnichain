@@ -72,14 +72,20 @@ reported as received.
   for native receipts.
 - **R6.** Released as a patch version, with a CHANGELOG entry that names the
   behaviour change for callers.
+- **R7.** A caller can ask for receipts as delivered instead
+  (`receipts: 'gross'` on `accountTransfersOf` and `getAccountTransfers`): the
+  incoming value whatever the transaction sent out, as before this change. Net is
+  the default.
 
 ---
 
 # Acceptance Criteria
 
-- **AC1 (R1, R2)** The staging refund trace above (`05035eb1…`: in 12 098 212,
-  out 9 000 000) recorded as a fixture: the vault has no native `RECEIVE`; its
-  `SEND` of 9 000 000 to the user is still reported.
+- **AC1 (R1)** The staging refund trace above (`05035eb1…`: in 12 098 212,
+  out 9 000 000) recorded as a fixture: the vault's native `RECEIVE` is
+  3 098 212 — the margin and fees Depositron leaves behind today — and its `SEND`
+  of 9 000 000 to the user is still reported. With Depositron's margin return in
+  the same transaction it has none (AC6).
 - **AC2 (R1)** A transaction that received 50 000 000 and sent 10 000 000 reports
   one native `RECEIVE` of 40 000 000.
 - **AC3 (R3)** A plain wallet deposit fixture (no outgoing messages) reports the
@@ -91,6 +97,9 @@ reported as received.
 - **AC5 (R4)** The existing bounce fixtures pass unchanged.
 - **AC6 (R2)** A relay that brought 12 098 212 in and sent 9 000 000 to the user
   plus 10 000 000 back to the fee payer reports no native `RECEIVE`.
+- **AC7 (R7)** A destination that forwards 0.999 of a 1 TON receipt in the same
+  transaction: `gross` reports 1 TON, `net` (and the default) 0.001 TON. The
+  refund trace read `gross` reports the vault's 12 098 212.
 
 ---
 
@@ -109,13 +118,19 @@ reported as received.
   native receipts, and whether one is reported.
 - Callers: Clydner (`tonapi-watcher.service.ts` → `accountTransfersOf`) and
   rango-intents (`getAccountTransfers` in deposit enrichment and
-  `POST /transaction`). Both pick this up with a version bump.
+  `POST /transaction`) want net, the default, and pick it up with a version bump.
+- rango-intents' fill proof (`proof/services/ton_fill_status.ts`) proves that a
+  solver's TON reached the destination. A destination that forwards it in the
+  same transaction keeps little or nothing, so net would reject a real fill: it
+  must pass `receipts: 'gross'` when it bumps to this version.
 
 ## Dependencies / blockers
 
-None. Depositron's margin return (`../depositron/1-ton-return-relay-margin.md`)
-is what makes a refund's net negative; this card is useful without it, and must
-ship before it.
+None to build. Depositron's margin return (`../depositron/1-ton-return-relay-margin.md`)
+is what makes a refund's net negative. On its own this card only shrinks the
+phantom receipt to the leftover (AC1), so it does not fix the incident alone:
+omnichain, Clydner, rango-intents and Depositron's margin return reach
+production together, with no window between them where only some are live.
 
 ---
 

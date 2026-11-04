@@ -95,9 +95,9 @@ export interface TonAccountTransfer {
   /** The receiving owner, raw. */
   to: string;
   /**
-   * Nanotons, or the jetton's smallest unit. A native receipt is what the
-   * account kept: the incoming value less the values of every message the same
-   * transaction sent out.
+   * Nanotons, or the jetton's smallest unit. A native receipt is measured as
+   * {@link TonReceiptMeasure} says: by default the incoming value less the
+   * values of every message the same transaction sent out (fees not counted).
    */
   amount: bigint;
   /** The text comment it carried, if any. */
@@ -124,6 +124,15 @@ export interface TonAccountTransfer {
   /** Native only: a bounce of a message the account had sent, coming back. */
   bounced: boolean;
 }
+
+/**
+ * How a native receipt is measured. `net` (the default): what the account kept —
+ * the incoming value less every message value the same transaction sent out, and
+ * no receipt when that is zero or less; what a deposit watcher needs. `gross`:
+ * the incoming value as delivered, whatever the account did with it; what a
+ * proof that TON reached an account needs.
+ */
+export type TonReceiptMeasure = 'net' | 'gross';
 
 /** What an account sent and received in one trace. */
 export interface TonAccountTransfers {
@@ -638,16 +647,17 @@ export class TonChain extends Chain {
    * providers have no trace of it. Emit only `final` transfers; once
    * `settled`, the result will not change.
    */
-  async getAccountTransfers(args: { account: string; txHash: string }): Promise<TonAccountTransfers | null> {
+  async getAccountTransfers(args: { account: string; txHash: string; receipts?: TonReceiptMeasure }): Promise<TonAccountTransfers | null> {
     const trace = await this.getTraceByTransaction(args.txHash);
-    return trace === null ? null : this.accountTransfersOf(args.account, trace);
+    return trace === null ? null : this.accountTransfersOf(args.account, trace, { receipts: args.receipts });
   }
 
   /**
    * The transfers into and out of `account` in `trace`:
-   * - native TON it received — an incoming internal message, less what the
-   *   same transaction sent out, so TON that only passes through (a relayed
-   *   request paying out) is no receipt; not one its transaction sent back as
+   * - native TON it received — an incoming internal message, by default less
+   *   what the same transaction sent out, so TON that only passes through (a
+   *   relayed request paying out) is no receipt ({@link TonReceiptMeasure}); not
+   *   one its transaction sent back as
    *   a bounce — or sent, an outgoing internal message; a bounce of its own
    *   message coming back is a receipt marked `bounced`, and the bounce it
    *   sends back is no transfer;
@@ -655,7 +665,8 @@ export class TonChain extends Chain {
    * - the TON riding along a jetton transfer (`transfer`, `internal_transfer`,
    *   `transfer_notification`, `excesses`) is part of it, not a native transfer.
    */
-  async accountTransfersOf(account: string, trace: TonTrace): Promise<TonAccountTransfers> {
+  async accountTransfersOf(account: string, trace: TonTrace, opts: { receipts?: TonReceiptMeasure } = {}): Promise<TonAccountTransfers> {
+    const gross = opts.receipts === 'gross';
     const owner = tonRawAddress(account);
     const found: Array<Omit<TonAccountTransfer, 'final'> & { jettonShaped: boolean }> = [];
     const jettons = await this.getJettonTransfers(trace);
@@ -683,7 +694,7 @@ export class TonChain extends Chain {
       const inMsg = tx.inMsg;
       if (inMsg !== null && inMsg.source !== null && isNativePayment(inMsg)) {
         const sentBack = tx.aborted && tx.outMsgs.some((m) => m.bounced && m.destination === inMsg.source);
-        const kept = tx.outMsgs.reduce((left, m) => left - m.value, inMsg.value);
+        const kept = gross ? inMsg.value : tx.outMsgs.reduce((left, m) => left - m.value, inMsg.value);
         if (!sentBack && kept > 0n) {
           found.push({
             direction: 'RECEIVE',

@@ -16,6 +16,10 @@ TON: a native receipt is what the account kept. Behaviour change for callers of 
 
 - **A native `RECEIVE`'s `amount` is the incoming value less the values of every message the same transaction sent out**, and no native `RECEIVE` is reported when that is zero or less. TON that only passes through an account — a relayed request that pays out from the vault it reaches — is no longer reported as received at its full value, which let a refund request read as a new deposit. A transaction that sends nothing reports the same amount as before. Jetton transfers, `SEND` transfers and bounces are unchanged.
 
+### Added
+
+- **`receipts: 'gross'`** on `accountTransfersOf(account, trace, opts)` and `getAccountTransfers(args)`: native receipts as delivered, as before this release — for proving that TON reached an account (a destination that forwards it in the same transaction keeps little of it). `TonReceiptMeasure` names the two measures; `net` is the default.
+
 ## [0.7.2] — 2026-10-31
 
 TON: a key's wallet address, TonConnect `ton_proof` sign-in and `signData` text signatures. Additive.
