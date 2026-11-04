@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.3] — 2026-11-04
+
+TON: a native receipt is what the account kept. Behaviour change for callers of `accountTransfersOf` and `getAccountTransfers`.
+
+### Changed
+
+- **A native `RECEIVE`'s `amount` is the incoming value less the values of every message the same transaction sent out**, and no native `RECEIVE` is reported when that is zero or less. TON that only passes through an account — a relayed request that pays out from the vault it reaches — is no longer reported as received at its full value, which let a refund request read as a new deposit. A transaction that sends nothing reports the same amount as before. Jetton transfers, `SEND` transfers and bounces are unchanged.
+
 ## [0.7.2] — 2026-10-31
 
 TON: a key's wallet address, TonConnect `ton_proof` sign-in and `signData` text signatures. Additive.
