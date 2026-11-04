@@ -94,7 +94,11 @@ export interface TonAccountTransfer {
   from: string;
   /** The receiving owner, raw. */
   to: string;
-  /** Nanotons, or the jetton's smallest unit. */
+  /**
+   * Nanotons, or the jetton's smallest unit. A native receipt is what the
+   * account kept: the incoming value less the values of every message the same
+   * transaction sent out.
+   */
   amount: bigint;
   /** The text comment it carried, if any. */
   comment: string | null;
@@ -641,11 +645,12 @@ export class TonChain extends Chain {
 
   /**
    * The transfers into and out of `account` in `trace`:
-   * - native TON it received — an incoming internal message whose value it
-   *   kept, not one its transaction sent back as a bounce — or sent, an
-   *   outgoing internal message; a bounce of its own message coming back is
-   *   a receipt marked `bounced`, and the bounce it sends back is no
-   *   transfer;
+   * - native TON it received — an incoming internal message, less what the
+   *   same transaction sent out, so TON that only passes through (a relayed
+   *   request paying out) is no receipt; not one its transaction sent back as
+   *   a bounce — or sent, an outgoing internal message; a bounce of its own
+   *   message coming back is a receipt marked `bounced`, and the bounce it
+   *   sends back is no transfer;
    * - jettons it sent or received as owner ({@link getJettonTransfers});
    * - the TON riding along a jetton transfer (`transfer`, `internal_transfer`,
    *   `transfer_notification`, `excesses`) is part of it, not a native transfer.
@@ -678,13 +683,14 @@ export class TonChain extends Chain {
       const inMsg = tx.inMsg;
       if (inMsg !== null && inMsg.source !== null && isNativePayment(inMsg)) {
         const sentBack = tx.aborted && tx.outMsgs.some((m) => m.bounced && m.destination === inMsg.source);
-        if (!sentBack) {
+        const kept = tx.outMsgs.reduce((left, m) => left - m.value, inMsg.value);
+        if (!sentBack && kept > 0n) {
           found.push({
             direction: 'RECEIVE',
             asset: { kind: 'native' },
             from: inMsg.source,
             to: owner,
-            amount: inMsg.value,
+            amount: kept,
             comment: tonTextCommentOf(inMsg.body),
             transaction: tx,
             index: 0,

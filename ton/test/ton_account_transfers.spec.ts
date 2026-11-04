@@ -195,8 +195,9 @@ describe('account transfers', () => {
     ]);
 
     const vault = (await chain.getAccountTransfers({ account: tonUserFriendlyAddress(vaultTx.account, { bounceable: false }), txHash: CHILD_TX })) as TonAccountTransfers;
+    // The vault kept only what it did not send back in the same transaction.
     expect(vault.transfers.map(({ direction, amount }) => ({ direction, amount }))).toEqual([
-      { direction: 'RECEIVE', amount: relay.value },
+      { direction: 'RECEIVE', amount: relay.value - back.value },
       { direction: 'SEND', amount: back.value },
     ]);
     await expect(chainWith(fakeProvider()).getAccountTransfers({ account: FEE_PAYER, txHash: CHILD_TX })).resolves.toBeNull();
@@ -303,6 +304,103 @@ describe('account transfers', () => {
     expect(receiver.transfers.map(({ amount, final }) => ({ amount, final }))).toEqual([
       { amount: root.outMsgs[0].value, final: false },
       { amount: 7n, final: true },
+    ]);
+  });
+});
+
+describe('native receipts net of what the receiving transaction sent out', () => {
+  // A Depositron refund on mainnet: the fee payer relays the vault's request with 12 098 212
+  // nanotons, and the vault sends the user's 9 000 000 back in the same transaction.
+  const REFUND_VAULT_TX = '05035eb1e8947908b17d47111cdd3efa9ea1fd99a742e547fe447d1c4bd495c2';
+  const refundTrace = async (): Promise<TonTrace> => {
+    stubFetch(() => ({ status: 200, body: fixture('toncenter_refund_relay_trace.json') }));
+    return (await new ToncenterProvider(ENDPOINT).getTraceByTransaction(REFUND_VAULT_TX)) as TonTrace;
+  };
+  const flows = (t: TonAccountTransfers | null) => t?.transfers.map(({ direction, asset, to, amount }) => ({ direction, kind: asset.kind, to, amount }));
+
+  it('reports no receipt for a relay that only passes TON through the vault, and keeps its payout', async () => {
+    const trace = await refundTrace();
+    const vaultTx = trace.transactions.find((tx) => tx.hash === REFUND_VAULT_TX) as TonTraceTransaction;
+    const [payout] = vaultTx.outMsgs;
+    expect([vaultTx.inMsg?.value, payout.value]).toEqual([12_098_212n, 9_000_000n]);
+    const chain = chainWith(fakeProvider({ getTraceByTransaction: async () => trace }));
+
+    // What stayed behind, 3 098 212, is still kept; a vault that returns it keeps nothing.
+    expect(flows(await chain.getAccountTransfers({ account: vaultTx.account, txHash: REFUND_VAULT_TX }))).toEqual([
+      { direction: 'RECEIVE', kind: 'native', to: vaultTx.account, amount: 3_098_212n },
+      { direction: 'SEND', kind: 'native', to: payout.destination, amount: 9_000_000n },
+    ]);
+    const relayer = trace.transactions[0].account;
+    const giveBack: TonTraceMessage = { ...payout, destination: relayer, value: 10_000_000n, createdLt: (payout.createdLt as bigint) + 1n, body: null };
+    const returning: TonTrace = { ...trace, transactions: trace.transactions.map((tx) => (tx.hash === REFUND_VAULT_TX ? { ...tx, outMsgs: [payout, giveBack] } : tx)) };
+    const returned = chainWith(fakeProvider({ getTraceByTransaction: async () => returning }));
+    expect(flows(await returned.getAccountTransfers({ account: vaultTx.account, txHash: REFUND_VAULT_TX }))).toEqual([
+      { direction: 'SEND', kind: 'native', to: payout.destination, amount: 9_000_000n },
+      { direction: 'SEND', kind: 'native', to: relayer, amount: 10_000_000n },
+    ]);
+
+    // The refund the user received, in a transaction that sent nothing, is the full amount.
+    const user = payout.destination as string;
+    expect(flows(await chain.getAccountTransfers({ account: user, txHash: REFUND_VAULT_TX }))).toEqual([
+      { direction: 'RECEIVE', kind: 'native', to: user, amount: 9_000_000n },
+    ]);
+  });
+
+  it('keeps the difference when a transaction sends out less than it received, and nothing when it sends all', async () => {
+    const [root, child] = (await realTrace()).transactions;
+    const incoming: TonTraceMessage = { ...root.outMsgs[0], value: 50_000_000n };
+    const onward = (value: bigint): TonTraceMessage => ({ ...incoming, source: child.account, destination: OTHER, value, createdLt: (incoming.createdLt as bigint) + 1n, body: null });
+    const receiptOf = async (outMsgs: TonTraceMessage[]) => {
+      const trace: TonTrace = { complete: true, transactions: settled([{ ...root, outMsgs: [incoming] }, { ...child, inMsg: incoming, outMsgs }]) };
+      const result = await chainWith(fakeProvider({ getTraceByTransaction: async () => trace })).getAccountTransfers({ account: child.account, txHash: 'ab'.repeat(32) });
+      return flows(result)?.filter((t) => t.direction === 'RECEIVE');
+    };
+    expect(await receiptOf([])).toEqual([{ direction: 'RECEIVE', kind: 'native', to: child.account, amount: 50_000_000n }]);
+    expect(await receiptOf([onward(10_000_000n)])).toEqual([{ direction: 'RECEIVE', kind: 'native', to: child.account, amount: 40_000_000n }]);
+    expect(await receiptOf([onward(50_000_000n)])).toEqual([]);
+    expect(await receiptOf([onward(30_000_000n), onward(30_000_000n)])).toEqual([]);
+  });
+
+  it("nets a jetton payout's attached TON against the relay, and leaves the jetton send as it is", async () => {
+    const [root] = (await realTrace()).transactions;
+    const vault = root.account;
+    const VAULT_JW = '0:' + '1a'.repeat(32);
+    const RECIPIENT_JW = '0:' + '2b'.repeat(32);
+    const relay: TonTraceMessage = { ...root.outMsgs[0], source: OTHER, destination: vault, value: 62_000_000n, body: null };
+    const transfer: TonTraceMessage = {
+      ...root.outMsgs[0],
+      source: vault,
+      destination: VAULT_JW,
+      value: 50_000_000n,
+      bounce: true,
+      opcode: 0x0f8a7ea5,
+      createdLt: (relay.createdLt as bigint) + 1n,
+      body: tonJettonTransferBody({ amount: 7_000_000n, destination: OTHER, responseDestination: OTHER, forwardTonAmount: 1n }),
+    };
+    const internalTransfer: TonTraceMessage = {
+      ...transfer,
+      source: VAULT_JW,
+      destination: RECIPIENT_JW,
+      value: 40_000_000n,
+      opcode: TON_JETTON_INTERNAL_TRANSFER_OP,
+      createdLt: (transfer.createdLt as bigint) + 2n,
+      body: beginCell().storeUint(TON_JETTON_INTERNAL_TRANSFER_OP, 32).storeUint(0, 64).storeCoins(7_000_000n).storeAddress(Address.parse(vault)).storeAddress(Address.parse(OTHER)).storeCoins(1n).storeBit(false).endCell(),
+    };
+    const tx = (hash: string, parent: string | null, account: string, inMsg: TonTraceMessage, outMsgs: TonTraceMessage[] = []): TonTraceTransaction => ({ ...root, hash: hash.repeat(32), parent, account, inMsg, outMsgs, success: true, aborted: false });
+    const vaultTx = tx('c0', null, vault, relay, [transfer]);
+    const vaultJettonWallet = tx('c1', vaultTx.hash, VAULT_JW, transfer, [internalTransfer]);
+    const recipientJettonWallet = tx('c2', vaultJettonWallet.hash, RECIPIENT_JW, internalTransfer);
+    const trace: TonTrace = { complete: true, transactions: settled([vaultTx, vaultJettonWallet, recipientJettonWallet]) };
+    const chain = chainWith(
+      fakeProvider({
+        getTraceByTransaction: async () => trace,
+        getJettonWalletData: async (wallet: string) => (wallet === VAULT_JW ? { balance: 0n, owner: vault, jettonMaster: USDT_MASTER } : null),
+        getJettonWalletAddress: async (_master: string, owner: string) => (owner === vault ? VAULT_JW : owner === OTHER ? RECIPIENT_JW : JETTON_WALLET),
+      }),
+    );
+    expect(flows(await chain.getAccountTransfers({ account: vault, txHash: 'ab'.repeat(32) }))).toEqual([
+      { direction: 'RECEIVE', kind: 'native', to: vault, amount: 12_000_000n },
+      { direction: 'SEND', kind: 'jetton', to: OTHER, amount: 7_000_000n },
     ]);
   });
 });
